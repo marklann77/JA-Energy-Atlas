@@ -11,7 +11,7 @@
 # .\atlas_env\Scripts\activate
 
 ### 4. Install the required core web-mapping packages
-# pip install panel geemap geopandas nbconvert jupyter_bokeh pyogrio
+# pip install panel geemap geopandas nbconvert jupyter_bokeh pyogrio folium
 
 ### 5. Launch the local interactive server tab straight to the browser
 # panel serve app.py --show
