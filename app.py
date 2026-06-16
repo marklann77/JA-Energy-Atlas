@@ -21,173 +21,180 @@
 # --- END REFERENCE ---
 
 import os
-import ee
-import geemap
 import geopandas as gpd
 import panel as pn
- 
-# --- Initialize ---
-ee.Initialize()
-pn.extension('ipywidgets', design='bootstrap')
- 
-# --- Load Parish GeoJSON ---
+import folium
+
+# --- Initialize Panel ---
+pn.extension(design='bootstrap')
+
 base_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in locals() else os.getcwd()
-geojson_path = os.path.join(base_dir, "assets", "ja_parishes.json")
-gdf = gpd.read_file(geojson_path)
 
-import json
-from shapely.geometry import shape, mapping, LineString, Point, MultiLineString
-from shapely.ops import unary_union
+# --- 1. Load Local Data ---
+parish_path = os.path.join(base_dir, "assets", "ja_parishes.json")
+parish_gdf = gpd.read_file(parish_path)
 
-# --- Load Overpass Turbo Energy Infrastructure JSON and convert to GeoDataFrame ---
-def overpass_to_gdf(path):
-    with open(path) as f:
-        data = json.load(f)
+poverty_path = os.path.join(base_dir, "assets", "jamaica_poverty_2012.geojson")
+poverty_gdf = gpd.read_file(poverty_path)
 
-    # Build a node id -> (lon, lat) lookup for way geometry reconstruction
-    node_coords = {
-        el['id']: (el['lon'], el['lat'])
-        for el in data['elements']
-        if el['type'] == 'node' and 'lon' in el
-    }
+grid_path = os.path.join(base_dir, "assets", "overpass_energy_infra_2.geojson")
+grid_gdf = gpd.read_file(grid_path)
 
-    rows = []
-    for el in data['elements']:
-        tags = el.get('tags', {})
-        if not tags.get('power'):
-            continue
+# Convert all metadata to strings to prevent JSON errors
+for df in [parish_gdf, poverty_gdf, grid_gdf]:
+    for col in df.columns:
+        if col != 'geometry':
+            df[col] = df[col].astype(str)
 
-        if el['type'] == 'node' and 'lon' in el:
-            geom = Point(el['lon'], el['lat'])
-        elif el['type'] == 'way':
-            coords = [node_coords[n] for n in el.get('nodes', []) if n in node_coords]
-            if len(coords) < 2:
-                continue
-            geom = LineString(coords)
-        else:
-            continue
+valid_types = ['Point', 'MultiPoint', 'LineString', 'MultiLineString', 'Polygon', 'MultiPolygon']
+grid_gdf = grid_gdf[grid_gdf.geometry.type.isin(valid_types)].copy()
 
-        rows.append({
-            'geometry': geom,
-            'power':    tags.get('power', ''),
-            'name':     tags.get('name', ''),
-            'voltage':  tags.get('voltage', ''),
-            'operator': tags.get('operator', ''),
-            'output_mw': tags.get('plant:output:electricity', ''),
-            'source':   tags.get('plant:source', ''),
-        })
+# Filter Infrastructure
+transmission_gdf = grid_gdf[grid_gdf['power'] == 'line']
 
-    return gpd.GeoDataFrame(rows, crs="EPSG:4326")
+# GEOMETRY UPGRADE: Convert complex plant polygons into single center-points (centroids) for pins
+plants_gdf = grid_gdf[grid_gdf['power'] == 'plant'].copy()
+# Suppress the CRS warning since we just need rough visual centers
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    plants_gdf['geometry'] = plants_gdf.geometry.centroid
 
-power_gdf = overpass_to_gdf(os.path.join(base_dir, "assets", "overpass_energy_infra.json"))
+# --- 2. Build Native Folium Map ---
+m = folium.Map(location=[18.15, -77.3], zoom_start=9, tiles="CartoDB dark_matter")
 
-# --- Convert to EE and style by power type ---
-power_ee = geemap.geopandas_to_ee(power_gdf)
+# ADD NIGHTTIME LIGHTS (NASA VIIRS Black Marble overlay)
+folium.TileLayer(
+    tiles='https://map1.vis.earthdata.nasa.gov/wmts-webmerc/VIIRS_CityLights_2012/default//GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpg',
+    attr='NASA EarthData',
+    name='Nighttime Lights (2012)',
+    overlay=True,
+    opacity=0.5
+).add_to(m)
 
-def style_layer(power_type, color, width=1.5):
-    subset = power_ee.filter(ee.Filter.eq('power', power_type))
-    return subset.style(color=color, fillColor=color + "55", width=width)
+# Add Communities with HOVER TOOLTIPS
+# Using the columns 'COMM_NAME' and 'av_CONS' based on your previous terminal outputs
+community_tooltip = folium.GeoJsonTooltip(
+    fields=['COMM_NAME', 'PARISH', 'av_CONS'],
+    aliases=['Community:', 'Parish:', 'Avg Consumption:'],
+    style="background-color: #0f2535; color: #F5A623; font-family: monospace;"
+)
 
-# (power layers added below after m is initialized)
- 
-# --- Placeholder STATIN Data ---
-statin_data = {
-    "Kingston":      {"expenditure": 650000, "energy_burden": 0.06},
-    "St. Andrew":    {"expenditure": 720000, "energy_burden": 0.05},
-    "St. Catherine": {"expenditure": 580000, "energy_burden": 0.08},
-    "Clarendon":     {"expenditure": 490000, "energy_burden": 0.11},
-    "Manchester":    {"expenditure": 520000, "energy_burden": 0.09},
-    "St. Elizabeth": {"expenditure": 460000, "energy_burden": 0.13},
-    "Westmoreland":  {"expenditure": 480000, "energy_burden": 0.12},
-    "Hanover":       {"expenditure": 500000, "energy_burden": 0.10},
-    "St. James":     {"expenditure": 610000, "energy_burden": 0.07},
-    "Trelawny":      {"expenditure": 470000, "energy_burden": 0.11},
-    "St. Ann":       {"expenditure": 530000, "energy_burden": 0.09},
-    "St. Mary":      {"expenditure": 440000, "energy_burden": 0.14},
-    "Portland":      {"expenditure": 430000, "energy_burden": 0.15},
-    "St. Thomas":    {"expenditure": 410000, "energy_burden": 0.16},
-}
- 
-gdf['expenditure']   = gdf['name'].map(lambda x: statin_data.get(x, {}).get('expenditure', 0))
-gdf['energy_burden'] = gdf['name'].map(lambda x: statin_data.get(x, {}).get('energy_burden', 0.0))
- 
-# ---  Convert GDF to EE FeatureCollection and style it ---
-jamaica_parishes = geemap.geopandas_to_ee(gdf)
- 
-parish_style = {
-    "color":     "F5A623",   # gold outline
-    "fillColor": "1a3a4a",   # dark teal fill
-    "width":     1.5
-}
-styled = jamaica_parishes.style(**parish_style)
- 
-# ---  Build geemap Map (this is a real ipywidget) ---
-m = geemap.Map(center=(18.1, -77.3), zoom=9)
-m.layout.height = "700px"
-m.layout.width  = "100%"
-m.add_basemap("CartoDB.DarkMatter")
-m.addLayer(styled, {}, "Jamaica Parishes")
+folium.GeoJson(
+    poverty_gdf,
+    name="Communities (Hover for Data)",
+    style_function=lambda x: {'color': '#FFFFFF', 'fillOpacity': 0.05, 'weight': 0.5, 'opacity': 0.3},
+    tooltip=community_tooltip
+).add_to(m)
 
-# --- Power Infrastructure Layers (order matters: lines first, points on top) ---
-m.addLayer(style_layer('line',       'FF4444', width=2), {}, "Transmission Lines")
-m.addLayer(style_layer('minor_line', 'FF8C00', width=1), {}, "Distribution Lines")
-m.addLayer(style_layer('substation', 'FFD700', width=1), {}, "Substations")
-m.addLayer(style_layer('plant',      '00FF88', width=2), {}, "Power Plants")
- 
-# --- Sidebar Metric Cards (plain Panel components, no fake library) ---
+# Add Parishes
+folium.GeoJson(
+    parish_gdf,
+    name="Parish Boundaries",
+    style_function=lambda x: {'color': "#D5D5D5", 'fillOpacity': 0, 'weight': 1.0}
+).add_to(m)
+
+# Add Transmission Lines
+folium.GeoJson(
+    transmission_gdf,
+    name="Transmission Lines",
+    style_function=lambda x: {'color': "#F8D705", 'weight': 2.0}
+).add_to(m)
+
+# Add Power Plants as CLICKABLE MARKERS
+# We loop through the plants and drop a specific pin for each one
+for idx, row in plants_gdf.iterrows():
+    plant_name = row.get('name', 'Unnamed Plant')
+    source = row.get('plant:source', 'Unknown Fuel')
+    capacity = row.get('plant:output:electricity', 'Unknown Capacity')
+    
+    # Build a clean HTML popup window
+    popup_html = f"<b>{plant_name}</b><br>Source: {source}<br>Capacity: {capacity}"
+    
+    folium.Marker(
+        location=[row.geometry.y, row.geometry.x],
+        popup=folium.Popup(popup_html, max_width=250),
+        icon=folium.Icon(color='red', icon='bolt', prefix='fa'),
+    ).add_to(m)
+
+folium.LayerControl(collapsed=False).add_to(m)
+
+# --- 3. Sidebar UI Elements & Interactivity ---
+
+# 3A. The Parish Dropdown Widget
+# Extract a clean, sorted list of unique parish names from the data
+parish_list = sorted(poverty_gdf['PARISH'].dropna().unique().tolist())
+parish_selector = pn.widgets.Select(name='Select a Parish Focus', options=['Island-Wide'] + parish_list)
+
+# 3B. The Dynamic Info Box (Listens to the dropdown)
+@pn.depends(parish_selector.param.value)
+def dynamic_parish_info(selected_parish):
+    if selected_parish == 'Island-Wide':
+        text = "Viewing total island metrics. Select a specific parish from the dropdown to view localized vulnerability data."
+    else:
+        text = f"**{selected_parish} Analysis:**\n\n*(Placeholder: You can eventually filter your STATIN data here to show exact totals for {selected_parish}.)*"
+    
+    return pn.pane.Markdown(text, styles={"color": "#8fa8b8", "font-size": "13px"})
+
 def metric_card(label, value, color="#F5A623"):
     return pn.pane.HTML(
         f"""
-        <div style="
-            background: #0f2535;
-            border-left: 4px solid {color};
-            border-radius: 6px;
-            padding: 12px 16px;
-            margin-bottom: 10px;
-            font-family: monospace;
-        ">
+        <div style="background: #0f2535; border-left: 4px solid {color}; border-radius: 6px; padding: 12px 16px; margin-bottom: 10px; font-family: monospace;">
             <div style="color:#8fa8b8; font-size:11px; text-transform:uppercase; letter-spacing:1px;">{label}</div>
             <div style="color:#F5A623; font-size:24px; font-weight:700; margin-top:4px;">{value}</div>
         </div>
-        """,
-        width=280
-    )
- 
+        """, width=280)
+
+legend_html = """
+<div style="background: #0f2535; padding: 15px; border-radius: 6px; font-family: monospace; color: #8fa8b8;">
+    <h4 style="color: #F5A623; margin-top: 0px; margin-bottom: 15px;">Map Legend</h4>
+    <div style="display: flex; align-items: center; margin-bottom: 8px;">
+        <div style="width: 15px; height: 15px; background: #FF3D00; border-radius: 50%; margin-right: 10px;"></div> Power Plants
+    </div>
+    <div style="display: flex; align-items: center; margin-bottom: 8px;">
+        <div style="width: 20px; height: 3px; background: #00E5FF; margin-right: 10px;"></div> Transmission Lines
+    </div>
+    <div style="display: flex; align-items: center; margin-bottom: 8px;">
+        <div style="width: 20px; height: 3px; background: #F5A623; margin-right: 10px;"></div> Parish Boundaries
+    </div>
+</div>
+"""
+
 sidebar_content = pn.Column(
     pn.pane.Markdown("## BSC Metrics", styles={"color": "#F5A623"}),
-    metric_card("Overall Resiliency",    "42%"),
-    metric_card("Energy Justice",        "25%"),
-    metric_card("Committed",             "10%"),
-    metric_card("Carbon Intensity",      "35%"),
+    metric_card("Overall Resiliency",    "0%"),
+    metric_card("Energy Justice",        "0%"),
+    metric_card("Committed",             "0%"),
+    metric_card("Carbon Intensity",      "0%"),
     pn.layout.Divider(),
-    pn.pane.Markdown("### About", styles={"color": "#8fa8b8"}),
-    pn.pane.Markdown(
-        "Parish-level decision-support tool for equitable decarbonization "
-        "aligned with Jamaica Vision 2030.",
-        styles={"color": "#8fa8b8", "font-size": "12px"}
-    ),
+    parish_selector,       # Inject the Dropdown
+    dynamic_parish_info,   # Inject the dynamically updating text box
+    pn.layout.Divider(),
+    pn.pane.HTML(legend_html, width=280),
     width=300,
 )
- 
-# ---  Main Content ---
-map_pane = pn.pane.IPyWidget(m, sizing_mode='stretch_both', min_height=700)
- 
+
+# --- 4. Main Content Assembly ---
+map_pane = pn.pane.plot.Folium(m, min_height=700, sizing_mode='stretch_both')
+
 main_content = pn.Column(
-    pn.pane.Markdown("# Parish Workspace View"),
+    pn.pane.Markdown("# Map Overview", styles={"color": "#F5A623"}),
     map_pane,
     sizing_mode='stretch_both',
     margin=10
 )
- 
-# --- Assemble Template ---
+
+# --- 5. Assemble Template ---
+# PANEL DARK MODE ACTIVATED: theme='dark' forces the UI to match your map
 template = pn.template.FastListTemplate(
     title="Jamaica Energy Atlas",
     sidebar_width=320,
-    accent_base_color="#2F4F4F",
-    header_background="#1a3a4a",
+    theme='dark', 
+    accent_base_color="#0f2535",
+    header_background="#0f2535",
     sidebar=[sidebar_content],
     main=[main_content],
 )
- 
+
 template.servable()
  
