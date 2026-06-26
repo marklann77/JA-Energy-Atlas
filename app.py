@@ -19,10 +19,10 @@
 #CTRL + C in the terminal to stop the server when done
 
 # --- END REFERENCE ---
-
 import os
 import warnings
 import geopandas as gpd
+import pandas as pd
 import panel as pn
 import folium
 
@@ -31,15 +31,41 @@ pn.extension(design='bootstrap')
 
 base_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in locals() else os.getcwd()
 
+# --- JPS Blended Residential Rate (late 2025 / early 2026) ---
+# Source: blended effective rate including fuel/IPP charges, fixed fees, taxes.
+# av_CONS in our consumption file is in JMD already (confirmed by magnitude check),
+# so this rate is NOT applied to av_CONS directly — kept here for reference/labeling only.
+JPS_BLENDED_RATE_JMD_PER_KWH = 46.00
+
 # --- 1. Load Local Data ---
-parish_gdf  = gpd.read_file(os.path.join(base_dir, "assets", "ja_parishes.json"))
-poverty_gdf = gpd.read_file(os.path.join(base_dir, "assets", "jamaica_poverty_2012.geojson"))
-grid_gdf    = gpd.read_file(os.path.join(base_dir, "assets", "overpass_energy_infra_2.geojson"))
+parish_gdf      = gpd.read_file(os.path.join(base_dir, "assets", "ja_parishes.json")) # Load parish boundaries
+poverty_gdf     = gpd.read_file(os.path.join(base_dir, "assets", "jamaica_poverty_2012.geojson")) # Load poverty data
+consumption_gdf = gpd.read_file(os.path.join(base_dir, "assets", "jamaica_consumption_2012.geojson")) # Load consumption data
+grid_gdf        = gpd.read_file(os.path.join(base_dir, "assets", "overpass_energy_infra_2.geojson")) # Load grid data
+dwel_df         = pd.read_csv(os.path.join(base_dir, "assets", "PopulationandDwellingCountsbyCommunity_.csv")) # Load dwelling data
+
+# --- CRS FIX ---
+# parish_gdf is correctly in EPSG:4326 (real lat/lon, e.g. -77, 18).
+# poverty_gdf and consumption_gdf report .crs as EPSG:4326 but their actual coordinate
+# VALUES are in Web Mercator meters (e.g. -8700000, 2050000) — the CRS tag is wrong/stale.
+# We force-assign the correct original CRS (EPSG:3857) then reproject to EPSG:4326
+# so all layers actually align on the map.
+def fix_crs(gdf):
+    gdf = gdf.set_crs("EPSG:3857", allow_override=True)
+    return gdf.to_crs("EPSG:4326")
+
+poverty_gdf     = fix_crs(poverty_gdf)
+consumption_gdf = fix_crs(consumption_gdf)
 
 # Stringify all non-geometry columns to prevent JSON serialization errors
-for df in [parish_gdf, poverty_gdf, grid_gdf]:
+# (done AFTER CRS fix, and we keep numeric copies of key fields before stringifying)
+poverty_gdf['av_CONS_numeric']     = pd.to_numeric(consumption_gdf['av_CONS'], errors='coerce')
+poverty_gdf['Per_Tot_Po_numeric']  = pd.to_numeric(poverty_gdf['Per_Tot_Po'], errors='coerce')
+consumption_gdf['av_CONS_numeric'] = pd.to_numeric(consumption_gdf['av_CONS'], errors='coerce')
+
+for df in [parish_gdf, poverty_gdf, consumption_gdf, grid_gdf]:
     for col in df.columns:
-        if col != 'geometry':
+        if col != 'geometry' and not col.endswith('_numeric'):
             df[col] = df[col].astype(str)
 
 # Filter to valid geometry types only
@@ -56,25 +82,22 @@ with warnings.catch_warnings():
     plants_gdf['geometry'] = plants_gdf.geometry.centroid
 
 # --- Parish name normalization ---
-# poverty_gdf['PARISH'] has inconsistent casing/spacing (e.g. 'ST. THOMAS', 'St.Elizabeth').
-# parish_gdf['name'] is treated as the clean source of truth. We normalize both to a
-# common key (uppercase, no periods, single spaces) purely for matching — display
-# always uses the clean parish_gdf['name'] version.
 def normalize_parish(name):
     if not isinstance(name, str):
         return ""
-    return " ".join(name.upper().replace(".", "").split())
+    cleaned = name.upper().replace(".", "")
+    cleaned = cleaned.replace("SAINT", "ST")
+    return " ".join(cleaned.split())
 
-parish_gdf['_parish_key'] = parish_gdf['name'].apply(normalize_parish)
-poverty_gdf['_parish_key'] = poverty_gdf['PARISH'].apply(normalize_parish)
+parish_gdf['_parish_key']      = parish_gdf['name'].apply(normalize_parish)
+poverty_gdf['_parish_key']     = poverty_gdf['PARISH'].apply(normalize_parish)
+consumption_gdf['_parish_key'] = consumption_gdf['PARISH'].apply(normalize_parish)
+if 'Parish' in dwel_df.columns:
+    dwel_df['_parish_key'] = dwel_df['Parish'].apply(normalize_parish)
 
-# Source of truth: parish names from ja_parishes.json
 parish_list = sorted(parish_gdf['name'].dropna().unique().tolist())
-
-# Lookup: clean parish name -> normalized key, so we can filter poverty_gdf correctly
 parish_name_to_key = dict(zip(parish_gdf['name'], parish_gdf['_parish_key']))
 
-# Community list builder: depends on selected parish
 def get_community_list(selected_parish):
     if selected_parish == 'Island-Wide':
         df = poverty_gdf
@@ -98,7 +121,6 @@ community_selector = pn.widgets.Select(
     width=270
 )
 
-# Update community dropdown when parish changes
 def update_communities(event):
     community_selector.options = get_community_list(event.new)
     community_selector.value = 'All Communities'
@@ -109,16 +131,7 @@ parish_selector.param.watch(update_communities, 'value')
 def build_map(selected_parish, selected_community):
     m = folium.Map(location=[18.15, -77.3], zoom_start=9, tiles="CartoDB dark_matter")
 
-    # Nighttime lights — commented out, tile source unreliable
-    # folium.TileLayer(
-    #     tiles='https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Black_Marble_NightLights_3Band_2016/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpg',
-    #     attr='NASA EOSDIS GIBS',
-    #     name='Nighttime Lights',
-    #     overlay=True,
-    #     opacity=0.6
-    # ).add_to(m)
-
-    # Parish Boundaries — gray, source of truth from ja_parishes.json
+    # Parish Boundaries — gray
     folium.GeoJson(
         parish_gdf,
         name="Parish Boundaries",
@@ -130,7 +143,7 @@ def build_map(selected_parish, selected_community):
         )
     ).add_to(m)
 
-    # Communities — filtered by parish then community
+    # Communities — filtered, now correctly reprojected
     if selected_parish == 'Island-Wide':
         communities_to_show = poverty_gdf
     else:
@@ -142,19 +155,27 @@ def build_map(selected_parish, selected_community):
             communities_to_show['COMM_NAME'] == selected_community
         ]
 
-    tooltip_fields  = [c for c in ['COMM_NAME', 'PARISH', 'av_CONS'] if c in poverty_gdf.columns]
-    tooltip_aliases = ['Community:', 'Parish:', 'Avg Consumption:'][:len(tooltip_fields)]
+    tooltip_fields  = [c for c in ['COMM_NAME', 'PARISH'] if c in poverty_gdf.columns]
+    tooltip_aliases = ['Community:', 'Parish:'][:len(tooltip_fields)]
 
-    folium.GeoJson(
-        communities_to_show,
-        name="Communities",
-        style_function=lambda x: {'color': '#FFFFFF', 'fillOpacity': 0.05, 'weight': 0.5, 'opacity': 0.4},
-        tooltip=folium.GeoJsonTooltip(
-            fields=tooltip_fields,
-            aliases=tooltip_aliases,
-            style="background-color:#0f2535; color:#F5A623; font-family:monospace;"
-        )
-    ).add_to(m)
+    if len(communities_to_show) > 0:
+        folium.GeoJson(
+            communities_to_show,
+            name="Communities",
+            style_function=lambda x: {
+                'color': '#00E5FF',
+                'fillColor': '#00E5FF',
+                'fillOpacity': 0.15,
+                'weight': 1.5,
+                'opacity': 0.9
+            },
+            highlight_function=lambda x: {'weight': 3, 'fillOpacity': 0.35},
+            tooltip=folium.GeoJsonTooltip(
+                fields=tooltip_fields,
+                aliases=tooltip_aliases,
+                style="background-color:#0f2535; color:#F5A623; font-family:monospace;"
+            )
+        ).add_to(m)
 
     # Transmission Lines — gold
     folium.GeoJson(
@@ -176,6 +197,15 @@ def build_map(selected_parish, selected_community):
         ).add_to(m)
 
     folium.LayerControl(collapsed=False).add_to(m)
+
+    # --- ZOOM TO SELECTED PARISH ---
+    if selected_parish != 'Island-Wide':
+        match = parish_gdf[parish_gdf['name'] == selected_parish]
+        if len(match) > 0:
+            minx, miny, maxx, maxy = match.total_bounds
+            # folium wants [[south, west], [north, east]] i.e. [[lat,lon],[lat,lon]]
+            m.fit_bounds([[miny, minx], [maxy, maxx]])
+
     return m
 
 # --- 4. Reactive Map ---
@@ -208,73 +238,109 @@ def metric_card(label, value, color="#F5A623"):
             <div style="color:{color}; font-size:24px; font-weight:700; margin-top:4px;">{value}</div>
         </div>""", width=280)
 
-# --- 7. Bottom Metrics Bar (~2.5x taller) ---
-bottom_bar = pn.Row(
-    pn.pane.HTML("""
+# --- 7. Reactive Bottom Metrics Bar ---
+def lookup_dwelling_row(parish_display_name, community_name):
+    if 'Community' not in dwel_df.columns:
+        return None
+    key = parish_name_to_key.get(parish_display_name)
+    subset = dwel_df[dwel_df['_parish_key'] == key] if key and '_parish_key' in dwel_df.columns else dwel_df
+    match = subset[subset['Community'].astype(str).str.strip().str.upper() == community_name.strip().upper()]
+    return match.iloc[0] if len(match) > 0 else None
+
+def lookup_poverty_row(parish_display_name, community_name):
+    key = parish_name_to_key.get(parish_display_name)
+    subset = poverty_gdf[poverty_gdf['_parish_key'] == key] if key else poverty_gdf
+    if 'COMM_NAME' not in subset.columns:
+        return None
+    match = subset[subset['COMM_NAME'].astype(str).str.strip().str.upper() == community_name.strip().upper()]
+    return match.iloc[0] if len(match) > 0 else None
+
+def lookup_consumption_row(parish_display_name, community_name):
+    key = parish_name_to_key.get(parish_display_name)
+    subset = consumption_gdf[consumption_gdf['_parish_key'] == key] if key else consumption_gdf
+    if 'COMM_NAME' not in subset.columns:
+        return None
+    match = subset[subset['COMM_NAME'].astype(str).str.strip().str.upper() == community_name.strip().upper()]
+    return match.iloc[0] if len(match) > 0 else None
+
+def stat_block(label, value, sublabel="", color="#fff"):
+    sub_html = f'<div style="color:#8fa8b8; font-size:9px;">{sublabel}</div>' if sublabel else ""
+    return f"""
+        <div>
+            <div style="color:#8fa8b8; font-size:10px; margin-bottom:4px;">{label}</div>
+            <div style="color:{color}; font-size:28px; font-weight:700;">{value}</div>
+            {sub_html}
+        </div>"""
+
+@pn.depends(parish_selector.param.value, community_selector.param.value)
+def bottom_bar(selected_parish, selected_community):
+    if selected_parish == 'Island-Wide' or selected_community == 'All Communities':
+        scope_label = "Island-Wide" if selected_parish == 'Island-Wide' else selected_parish
+        html = f"""
         <div style="background:#0f2535; padding:32px 32px; border-top:2px solid #F5A623;
                     font-family:monospace; width:100%; box-sizing:border-box;">
             <div style="color:#F5A623; font-size:11px; text-transform:uppercase;
-                        letter-spacing:2px; margin-bottom:20px;">Parish Snapshot</div>
+                        letter-spacing:2px; margin-bottom:20px;">{scope_label} Snapshot</div>
             <div style="display:flex; gap:40px; flex-wrap:wrap; margin-bottom:28px;">
-                <div>
-                    <div style="color:#8fa8b8; font-size:10px; margin-bottom:4px;">Total Parishes</div>
-                    <div style="color:#fff; font-size:28px; font-weight:700;">14</div>
-                </div>
-                <div>
-                    <div style="color:#8fa8b8; font-size:10px; margin-bottom:4px;">Population (2021)</div>
-                    <div style="color:#fff; font-size:28px; font-weight:700;">2.73M</div>
-                </div>
-                <div>
-                    <div style="color:#8fa8b8; font-size:10px; margin-bottom:4px;">Grid Connected</div>
-                    <div style="color:#fff; font-size:28px; font-weight:700;">~96%</div>
-                </div>
-                <div>
-                    <div style="color:#8fa8b8; font-size:10px; margin-bottom:4px;">Renewables Share</div>
-                    <div style="color:#fff; font-size:28px; font-weight:700;">~15%</div>
-                </div>
-                <div>
-                    <div style="color:#8fa8b8; font-size:10px; margin-bottom:4px;">Vision 2030 Target</div>
-                    <div style="color:#F5A623; font-size:28px; font-weight:700;">50%</div>
-                </div>
-                <div>
-                    <div style="color:#8fa8b8; font-size:10px; margin-bottom:4px;">Avg Energy Burden</div>
-                    <div style="color:#fff; font-size:28px; font-weight:700;">~10%</div>
-                </div>
+                {stat_block("Total Parishes", "14")}
+                {stat_block("Population (2021)", "2.73M")}
+                {stat_block("Grid Connected", "~96%")}
+                {stat_block("Renewables Share", "~15%")}
+                {stat_block("Vision 2030 Target", "50%", color="#F5A623")}
+                {stat_block("JPS Blended Rate", f"${JPS_BLENDED_RATE_JMD_PER_KWH:.2f} JMD/kWh", sublabel="Late 2025 / early 2026 est.")}
             </div>
-            <div style="color:#F5A623; font-size:11px; text-transform:uppercase;
-                        letter-spacing:2px; margin-bottom:16px;">Vision 2030 Decarbonization Progress</div>
-            <div style="display:flex; gap:40px; flex-wrap:wrap;">
-                <div>
-                    <div style="color:#8fa8b8; font-size:10px; margin-bottom:4px;">Solar Capacity (MW)</div>
-                    <div style="color:#fff; font-size:28px; font-weight:700;">~150</div>
-                    <div style="color:#8fa8b8; font-size:9px;">Target: 1,000 MW by 2030</div>
-                </div>
-                <div>
-                    <div style="color:#8fa8b8; font-size:10px; margin-bottom:4px;">Wind Capacity (MW)</div>
-                    <div style="color:#fff; font-size:28px; font-weight:700;">~70</div>
-                    <div style="color:#8fa8b8; font-size:9px;">Target: 500 MW by 2030</div>
-                </div>
-                <div>
-                    <div style="color:#8fa8b8; font-size:10px; margin-bottom:4px;">Distribution Losses</div>
-                    <div style="color:#fff; font-size:28px; font-weight:700;">~26%</div>
-                    <div style="color:#8fa8b8; font-size:9px;">Caribbean avg: ~15%</div>
-                </div>
-                <div>
-                    <div style="color:#8fa8b8; font-size:10px; margin-bottom:4px;">Avg Electricity Rate</div>
-                    <div style="color:#fff; font-size:28px; font-weight:700;">~$0.40/kWh</div>
-                    <div style="color:#8fa8b8; font-size:9px;">Among highest in region</div>
-                </div>
-                <div>
-                    <div style="color:#8fa8b8; font-size:10px; margin-bottom:4px;">High Burden Parishes</div>
-                    <div style="color:#FF3D00; font-size:28px; font-weight:700;">6 / 14</div>
-                    <div style="color:#8fa8b8; font-size:9px;">Burden > 10% of expenditure</div>
-                </div>
+            <div style="color:#8fa8b8; font-size:11px;">
+                Select a specific Parish and Community above to see localized data.
             </div>
+        </div>"""
+        return pn.pane.HTML(html, sizing_mode='stretch_width', margin=0)
+
+    dwel_row       = lookup_dwelling_row(selected_parish, selected_community)
+    poverty_row    = lookup_poverty_row(selected_parish, selected_community)
+    consumption_row = lookup_consumption_row(selected_parish, selected_community)
+
+    pop_val  = dwel_row['Total Population']    if dwel_row is not None and 'Total Population' in dwel_row else "N/A"
+    dwel_val = dwel_row['Number of Dwellings'] if dwel_row is not None and 'Number of Dwellings' in dwel_row else "N/A"
+    pov_val  = poverty_row['Per_Tot_Po']       if poverty_row is not None and 'Per_Tot_Po' in poverty_row else None
+
+    cons_numeric = None
+    if consumption_row is not None and 'av_CONS_numeric' in consumption_row:
+        val = consumption_row['av_CONS_numeric']
+        if pd.notna(val):
+            cons_numeric = val
+
+    if cons_numeric is not None:
+        cons_display = f"${cons_numeric:,.0f} JMD"
+        cons_sublabel = "Avg. household electricity expenditure"
+    else:
+        cons_display = "No data"
+        cons_sublabel = "Not available for this community"
+
+    try:
+        pov_display = f"{float(pov_val):.1f}%"
+    except (TypeError, ValueError):
+        pov_display = "N/A"
+
+    missing_note = ""
+    if dwel_row is None or poverty_row is None or cons_numeric is None:
+        missing_note = """<div style="color:#FF8C00; font-size:10px; margin-top:16px;">
+            ⚠ Some data not found for this community — coverage varies by source dataset.
+            </div>"""
+
+    html = f"""
+    <div style="background:#0f2535; padding:32px 32px; border-top:2px solid #F5A623;
+                font-family:monospace; width:100%; box-sizing:border-box;">
+        <div style="color:#F5A623; font-size:11px; text-transform:uppercase;
+                    letter-spacing:2px; margin-bottom:20px;">{selected_community}, {selected_parish}</div>
+        <div style="display:flex; gap:40px; flex-wrap:wrap;">
+            {stat_block("Total Population", pop_val)}
+            {stat_block("Number of Dwellings", dwel_val)}
+            {stat_block("Avg Electricity Expenditure", cons_display, sublabel=cons_sublabel)}
+            {stat_block("Poverty Rate", pov_display, color="#FF8C00")}
         </div>
-    """, sizing_mode='stretch_width'),
-    sizing_mode='stretch_width',
-    margin=0
-)
+        {missing_note}
+    </div>"""
+    return pn.pane.HTML(html, sizing_mode='stretch_width', margin=0)
 
 # --- 8. Legend ---
 legend_html = """
@@ -290,7 +356,7 @@ legend_html = """
         <div style="width:20px; height:3px; background:#A0A0A0; margin-right:10px;"></div> Parish Boundaries
     </div>
     <div style="display:flex; align-items:center; margin-bottom:8px;">
-        <div style="width:14px; height:14px; background:#ffffff22; border:1px solid #fff; margin-right:10px;"></div> Communities
+        <div style="width:14px; height:14px; background:#00E5FF44; border:1px solid #00E5FF; margin-right:10px;"></div> Communities
     </div>
 </div>"""
 
@@ -331,30 +397,3 @@ template = pn.template.FastListTemplate(
 )
 
 template.servable()
-
-# Testing
-
-consumption_gdf = gpd.read_file(
-    os.path.join(base_dir, "assets", "jamaica_consumption_2012.geojson")
-)
-
-import pandas as pd
-dwel_df = pd.read_csv(
-    os.path.join(base_dir, "assets", "PopulationandDwellingCountsbyCommunity_.csv")
-)
-
-print("\nCONSUMPTION COLUMNS")
-print(consumption_gdf.columns.tolist())
-
-print("\nCONSUMPTION HEAD")
-print(
-    consumption_gdf[
-        ['COMM_NAME','PARISH','POP']
-    ].head()
-)
-
-print("\nDWELLING COLUMNS")
-print(dwel_df.columns.tolist())
-
-print("\nDWELLING HEAD")
-print(dwel_df.head())
