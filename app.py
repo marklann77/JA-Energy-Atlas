@@ -1,3 +1,5 @@
+# LAST UPDATED: 6-25-2026
+
 # --- ENVIRONMENT SETUP REFERENCE (KEEP FOR REFERENCE) ---
 
 ### 1. Create a virtual environment named 'atlas_env' 
