@@ -1,4 +1,4 @@
-# LAST UPDATED: 6-27-2026
+# LAST UPDATED: 7-12-2026
 
 # --- ENVIRONMENT SETUP REFERENCE (KEEP FOR REFERENCE) ---
 
@@ -22,15 +22,17 @@
 
 # --- END REFERENCE ---
 import os
+import json
 import warnings
 import geopandas as gpd
 import pandas as pd
 import panel as pn
-import folium
+from ipyleaflet import Map as LeafletMap, GeoJSON, Marker, AwesomeIcon, basemaps, LayersControl, WidgetControl, LayerGroup
+from ipywidgets import HTML as IPyHTML
 import branca.colormap as cm
 
 # --- Initialize Panel ---
-pn.extension(design='bootstrap')
+pn.extension('ipywidgets', design='bootstrap')
 
 base_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in locals() else os.getcwd()
 
@@ -147,30 +149,48 @@ parish_selector.param.watch(update_communities, 'value')
 
 # --- 3. Map Builder ---
 def build_map(selected_parish, selected_community):
-    m = folium.Map(location=[18.15, -77.3], zoom_start=9, tiles="CartoDB dark_matter")
+    m = LeafletMap(center=(18.15, -77.3), zoom=9, basemap=basemaps.CartoDB.DarkMatter,
+                   prefer_canvas=True)
+    # prefer_canvas=True: Leaflet's SVG renderer has documented, long-standing bugs
+    # where polygon hover/click hit-detection breaks after the map pans or zooms
+    # (Leaflet issues #5773, #6142) — exactly what fit_bounds() does below every
+    # time a parish is selected. Canvas rendering avoids this entirely and also
+    # handles 100+ overlapping small polygons more reliably than SVG DOM paths.
+    m.layout.height = "500px"
 
-    # Parish Boundaries — always visible, gray
-    # NOTE: fillOpacity=0 means no fill, but Leaflet still needs SOME fill to register
-    # hover/mouse events reliably across the whole polygon (not just the border line).
-    # fillOpacity=0.01 is visually identical to 0 but keeps hover detection working
-    # everywhere inside the parish shape, not just exactly on the 1.5px border.
-    folium.GeoJson(
-        parish_gdf,
+    # info_box is created here but added to the map AFTER LayersControl below,
+    # so it doesn't show up as an unnamed ghost entry in the layer switcher.
+    info_box = IPyHTML(value="<i>Hover over the map for details</i>")
+    info_box.layout.margin = "0px 10px 10px 10px"
+
+    # --- Parish Boundaries — always visible, gray ---
+    parish_geojson_data = json.loads(parish_gdf.to_json())
+    parish_layer = GeoJSON(
+        data=parish_geojson_data,
         name="Parish Boundaries",
-        style_function=lambda x: {'color': '#A0A0A0', 'fillOpacity': 0.01, 'fillColor': '#000000', 'weight': 1.5},
-        highlight_function=lambda x: {'weight': 2.5, 'color': '#F5A623'},
-        tooltip=folium.GeoJsonTooltip(
-            fields=['name'],
-            aliases=['Parish:'],
-            style="background-color:#0f2535; color:#ffffff; font-family:monospace;",
-            sticky=True
-        )
-    ).add_to(m)
+        style={'color': '#A0A0A0', 'fillColor': '#000000', 'fillOpacity': 0.05, 'weight': 1.5},
+        hover_style={'color': '#F5A623', 'weight': 2.5, 'fillOpacity': 0.1},
+    )
 
-    # --- Energy Burden Choropleth (parish-level, JSLC 2023) ---
-    # Only shown at Island-Wide — once a single parish is selected, comparing
-    # 14 colors collapses to "this one parish, one shade," which isn't useful.
-    # The Poverty Rate choropleth below takes over at that zoom level instead.
+    def parish_hover(feature, **kwargs):
+        name = feature['properties'].get('name', 'Unknown')
+        info_box.value = f"<b style='color:#F5A623'>Parish:</b> {name}"
+
+    parish_layer.on_hover(parish_hover)
+    m.add(parish_layer)
+
+    # --- Zoom to selected parish — moved here, BEFORE the community layer is
+    # added below. Leaflet has documented bugs (#5773, #6142) where polygon
+    # hover/click hit-detection breaks if the map pans/zooms AFTER an
+    # interactive layer is added. Panning first, then adding the community
+    # layer once the view has settled, avoids that entirely.
+    if selected_parish != 'Island-Wide':
+        match = parish_gdf[parish_gdf['name'] == selected_parish]
+        if len(match) > 0:
+            minx, miny, maxx, maxy = match.total_bounds
+            m.fit_bounds([[miny, minx], [maxy, maxx]])
+
+    # --- Energy Burden Choropleth (parish-level, JSLC 2023) — Island-Wide only ---
     if selected_parish == 'Island-Wide':
         burden_min = parish_gdf['avg_burden_pct'].min()
         burden_max = parish_gdf['avg_burden_pct'].max()
@@ -180,153 +200,158 @@ def build_map(selected_parish, selected_community):
             vmax=burden_max
         )
 
-        def burden_style(feature):
-            val = feature['properties'].get('avg_burden_pct')
+        # FIX: ipyleaflet's style_callback computes styles once at construction
+        # and doesn't reliably re-propagate to the rendered Leaflet layer — this
+        # is a long-documented ipyleaflet limitation (GitHub issues #227, #341,
+        # #607, #675), not something fixable from our side via style_callback.
+        # The reliable approach is to bake the computed color directly into each
+        # feature's properties.style BEFORE constructing the GeoJSON layer.
+        def compute_burden_color(val):
             if val is None:
                 return {'fillColor': '#444444', 'color': '#A0A0A0', 'weight': 1, 'fillOpacity': 0.5}
-            return {
-                'fillColor': burden_colormap(val),
-                'color': '#0f2535',
-                'weight': 1,
-                'fillOpacity': 0.7
-            }
+            return {'fillColor': burden_colormap(val), 'color': '#0f2535', 'weight': 1, 'fillOpacity': 0.7}
 
-        folium.GeoJson(
-            parish_gdf,
+        burden_geojson_data = json.loads(json.dumps(parish_geojson_data))  # deep copy
+        for feat in burden_geojson_data['features']:
+            val = feat['properties'].get('avg_burden_pct')
+            feat['properties']['style'] = compute_burden_color(val)
+
+        burden_layer = GeoJSON(
+            data=burden_geojson_data,
             name="Energy Burden (%, JSLC 2023)",
-            style_function=burden_style,
-            highlight_function=lambda x: {'weight': 3, 'color': '#FFFFFF'},
-            tooltip=folium.GeoJsonTooltip(
-                fields=['name', 'avg_burden_pct'],
-                aliases=['Parish:', 'Avg Energy Burden (%):'],
-                style="background-color:#0f2535; color:#F5A623; font-family:monospace;",
-                sticky=True
-            ),
-            show=False  # off by default; person toggles it on via layer control
-        ).add_to(m)
-        burden_colormap.caption = 'Avg. Energy Burden (% of household expenditure) — JSLC 2023'
-        burden_colormap.add_to(m)
+            hover_style={'weight': 3, 'color': '#FFFFFF'},
+            visible=False  # off by default; person toggles it on via layer control
+        )
 
-    # --- OPTION A: Communities only render once a specific parish is chosen ---
+        def burden_hover(feature, **kwargs):
+            name = feature['properties'].get('name', 'Unknown')
+            val = feature['properties'].get('avg_burden_pct')
+            val_display = f"{val:.1f}%" if val is not None else "N/A"
+            info_box.value = f"<b style='color:#F5A623'>Parish:</b> {name}<br><b style='color:#FF8C00'>Avg Energy Burden:</b> {val_display}"
+
+        burden_layer.on_hover(burden_hover)
+        m.add(burden_layer)
+
+    # --- Communities: only render once a specific parish is chosen ---
     if selected_parish != 'Island-Wide':
         key = parish_name_to_key.get(selected_parish)
-        communities_to_show = poverty_gdf[poverty_gdf['_parish_key'] == key]
+        communities_to_show = poverty_gdf[poverty_gdf['_parish_key'] == key].copy()
 
         if selected_community != 'All Communities' and 'COMM_NAME' in communities_to_show.columns:
             communities_to_show = communities_to_show[
                 communities_to_show['COMM_NAME'] == selected_community
             ]
 
-        tooltip_fields  = [c for c in ['COMM_NAME', 'PARISH'] if c in poverty_gdf.columns]
-        tooltip_aliases = ['Community:', 'Parish:'][:len(tooltip_fields)]
+        # Always-real display name, never blank — unnamed ones get a stable
+        # index (#1, #2...) instead of a repeated generic label, so hovering
+        # between two different unnamed communities visibly shows different
+        # text, proving hover is per-feature rather than stuck on one shape.
+        communities_to_show = communities_to_show.reset_index(drop=True)
+        communities_to_show['_comm_display'] = [
+            row['COMM_NAME'] if isinstance(row['COMM_NAME'], str) and row['COMM_NAME'].strip() not in ('', 'nan', 'None')
+            else f'(Unnamed community #{i+1})'
+            for i, row in communities_to_show.iterrows()
+        ]
 
-        # Popup fields: shown on CLICK, separate from the hover tooltip above.
-        # Pulls whatever's available on this feature — COMM_NAME/PARISH always
-        # exist; Per_Tot_Po (poverty rate) only if present in this gdf.
-        popup_fields  = [c for c in ['COMM_NAME', 'PARISH', 'Per_Tot_Po'] if c in poverty_gdf.columns]
-        popup_aliases = ['Community:', 'Parish:', 'Poverty Rate (%):'][:len(popup_fields)]
+        if len(communities_to_show) > 0:
+            communities_geojson_data = json.loads(communities_to_show.to_json())
 
-        # --- Poverty Rate Choropleth (community-level, 2012 small-area model) ---
-        # Takes over the "compare across geography" job that the burden choropleth
-        # did at Island-Wide — but at community granularity within this one parish.
-        # Separate toggleable layer from the plain cyan "Communities" outline below.
-        if len(communities_to_show) > 0 and 'Per_Tot_Po_numeric' in communities_to_show.columns:
             pov_min = communities_to_show['Per_Tot_Po_numeric'].min()
             pov_max = communities_to_show['Per_Tot_Po_numeric'].max()
-            if pd.notna(pov_min) and pd.notna(pov_max) and pov_min != pov_max:
+            has_poverty_gradient = pd.notna(pov_min) and pd.notna(pov_max) and pov_min != pov_max
+
+            # ONE layer, matching the exact structure of the working parish
+            # burden layer: baked colors in properties.style, hover_style on
+            # THIS layer, on_hover/on_click on THIS SAME layer. No separate
+            # transparent overlay — that split was the actual bug causing both
+            # the blob hover and the washed colors.
+            if has_poverty_gradient:
                 poverty_colormap = cm.LinearColormap(
                     colors=['#1a3a4a', '#F5A623', '#FF3D00'],
                     vmin=pov_min,
                     vmax=pov_max
                 )
+                for feat in communities_geojson_data['features']:
+                    val = feat['properties'].get('Per_Tot_Po_numeric')
+                    is_unnamed = str(feat['properties'].get('_comm_display', '')).startswith('(Unnamed')
+                    if val is None or (isinstance(val, float) and val != val):
+                        feat['properties']['style'] = {'fillColor': '#2a2a2a', 'color': '#666666',
+                                                        'weight': 1, 'fillOpacity': 0.6,
+                                                        'dashArray': '3, 3' if is_unnamed else None}
+                    else:
+                        try:
+                            feat['properties']['style'] = {'fillColor': poverty_colormap(float(val)),
+                                                            'color': '#0f2535', 'weight': 1, 'fillOpacity': 0.85,
+                                                            'dashArray': '3, 3' if is_unnamed else None}
+                        except (TypeError, ValueError):
+                            feat['properties']['style'] = {'fillColor': '#2a2a2a', 'color': '#666666',
+                                                            'weight': 1, 'fillOpacity': 0.6,
+                                                            'dashArray': '3, 3' if is_unnamed else None}
+            else:
+                for feat in communities_geojson_data['features']:
+                    feat['properties']['style'] = {'fillColor': '#00E5FF', 'color': '#00E5FF',
+                                                    'fillOpacity': 0.12, 'weight': 1.5}
 
-                def poverty_style(feature):
-                    val = feature['properties'].get('Per_Tot_Po')
-                    try:
-                        val = float(val)
-                    except (TypeError, ValueError):
-                        return {'fillColor': '#444444', 'color': '#A0A0A0', 'weight': 1, 'fillOpacity': 0.5}
-                    return {
-                        'fillColor': poverty_colormap(val),
-                        'color': '#0f2535',
-                        'weight': 1,
-                        'fillOpacity': 0.7
-                    }
-
-                folium.GeoJson(
-                    communities_to_show,
-                    name="Poverty Rate (%, 2012 model)",
-                    style_function=poverty_style,
-                    highlight_function=lambda x: {'weight': 3, 'color': '#FFFFFF'},
-                    tooltip=folium.GeoJsonTooltip(
-                        fields=tooltip_fields + (['Per_Tot_Po'] if 'Per_Tot_Po' in poverty_gdf.columns else []),
-                        aliases=tooltip_aliases + (['Poverty Rate (%):'] if 'Per_Tot_Po' in poverty_gdf.columns else []),
-                        style="background-color:#0f2535; color:#F5A623; font-family:monospace;",
-                        sticky=True
-                    ),
-                    show=False  # off by default; person toggles it on via layer control
-                ).add_to(m)
-                poverty_colormap.caption = f'Poverty Rate (% of population) — {selected_parish}, 2012 model'
-                poverty_colormap.add_to(m)
-
-        if len(communities_to_show) > 0:
-            folium.GeoJson(
-                communities_to_show,
+            community_layer = GeoJSON(
+                data=communities_geojson_data,
                 name="Communities",
-                style_function=lambda x: {
-                    'color': '#00E5FF',
-                    'fillColor': '#00E5FF',
-                    'fillOpacity': 0.12,
-                    'weight': 1.5,
-                    'opacity': 0.9
-                },
-                # Hover highlight — thickens border and brightens fill on mouseover.
-                highlight_function=lambda x: {'weight': 3, 'fillOpacity': 0.4, 'color': '#FFFFFF'},
-                tooltip=folium.GeoJsonTooltip(
-                    fields=tooltip_fields,
-                    aliases=tooltip_aliases,
-                    style="background-color:#0f2535; color:#F5A623; font-family:monospace;",
-                    sticky=True
-                ),
-                # CLICK on a community opens this popup with its stats.
-                # This does NOT talk back to the Panel dropdown (that would need a
-                # JS<->Python bridge) — it's map-only, but reliable and simple.
-                popup=folium.GeoJsonPopup(
-                    fields=popup_fields,
-                    aliases=popup_aliases,
-                    localize=True,
-                    labels=True,
-                    style="background-color:#0f2535; color:#F5A623; font-family:monospace; border:1px solid #00E5FF;"
+                hover_style={'weight': 3, 'color': '#FFFFFF'},
+            )
+
+            def community_hover(feature, **kwargs):
+                name = feature['properties'].get('_comm_display', 'Unknown')
+                parish = feature['properties'].get('PARISH', '')
+                val = feature['properties'].get('Per_Tot_Po_numeric')
+                pov_str = (f"<br><b style='color:#F5A623'>Poverty Rate:</b> {val:.1f}%"
+                           if val is not None and isinstance(val, float) and val == val else "")
+                info_box.value = (
+                    f"<b style='color:#F5A623'>Community:</b> {name}"
+                    f"<br><b style='color:#F5A623'>Parish:</b> {parish}"
+                    f"{pov_str}"
+                    f"<br><i style='font-size:11px; color:#8fa8b8'>Click to select →</i>"
                 )
-            ).add_to(m)
 
-    # Transmission Lines — gold, always visible
-    folium.GeoJson(
-        transmission_gdf,
+            def community_click(feature, **kwargs):
+                name = feature['properties'].get('COMM_NAME')
+                if isinstance(name, str) and name.strip() not in ('', 'nan', 'None'):
+                    community_selector.value = name
+
+            community_layer.on_hover(community_hover)
+            community_layer.on_click(community_click)
+            m.add(community_layer)
+
+    # --- Transmission Lines — gold, always visible ---
+    transmission_geojson_data = json.loads(transmission_gdf.to_json())
+    transmission_layer = GeoJSON(
+        data=transmission_geojson_data,
         name="Transmission Lines",
-        style_function=lambda x: {'color': '#F5A623', 'weight': 2.0}
-    ).add_to(m)
+        style={'color': '#F5A623', 'weight': 2.0},
+    )
+    m.add(transmission_layer)
 
-    # Power Plants — always visible
+    # --- Power Plants — wrapped in LayerGroup so they appear as ONE entry
+    # in LayersControl, not as individual unnamed toggleable layers.
+    plant_markers = []
     for _, row in plants_gdf.iterrows():
-        plant_name = row.get('name', 'Unnamed Plant')
-        source     = row.get('plant:source', 'Unknown')
-        capacity   = row.get('plant:output:electricity', 'Unknown')
-        popup_html = f"<b style='color:#FF3D00'>{plant_name}</b><br>Fuel: {source}<br>Capacity: {capacity}"
-        folium.Marker(
-            location=[row.geometry.y, row.geometry.x],
-            popup=folium.Popup(popup_html, max_width=250),
-            icon=folium.Icon(color='red', icon='bolt', prefix='fa'),
-        ).add_to(m)
+        plant_name = row.get('name', '')
+        if not isinstance(plant_name, str) or plant_name.strip().lower() in ('', 'nan', 'none'):
+            continue
+        source   = row.get('plant:source', 'Unknown')
+        capacity = row.get('plant:output:electricity', 'Unknown')
+        popup_html = IPyHTML(value=f"<b style='color:#FF3D00'>{plant_name}</b><br>Fuel: {source}<br>Capacity: {capacity}")
+        marker = Marker(
+            location=(row.geometry.y, row.geometry.x),
+            icon=AwesomeIcon(name='bolt', marker_color='red', icon_color='white'),
+            draggable=False,
+        )
+        marker.popup = popup_html
+        plant_markers.append(marker)
+    m.add(LayerGroup(layers=plant_markers, name="Power Plants"))
 
-    folium.LayerControl(collapsed=False).add_to(m)
-
-    # Zoom to selected parish
-    if selected_parish != 'Island-Wide':
-        match = parish_gdf[parish_gdf['name'] == selected_parish]
-        if len(match) > 0:
-            minx, miny, maxx, maxy = match.total_bounds
-            m.fit_bounds([[miny, minx], [maxy, maxx]])
+    m.add(LayersControl(position='topright'))
+    # Add info_box AFTER LayersControl — WidgetControls added before LayersControl
+    # show up as unnamed ghost entries in the layer switcher list.
+    m.add(WidgetControl(widget=info_box, position='bottomright'))
 
     return m
 
@@ -334,7 +359,7 @@ def build_map(selected_parish, selected_community):
 @pn.depends(parish_selector.param.value, community_selector.param.value)
 def map_view(selected_parish, selected_community):
     m = build_map(selected_parish, selected_community)
-    return pn.pane.plot.Folium(m, min_height=500, sizing_mode='stretch_both')
+    return pn.pane.IPyWidget(m, min_height=500, sizing_mode='stretch_both')
 
 # --- 5. Reactive Parish Info ---
 @pn.depends(parish_selector.param.value, community_selector.param.value)
@@ -507,7 +532,9 @@ def bottom_bar(selected_parish, selected_community):
     return pn.pane.HTML(html, sizing_mode='stretch_width', margin=0)
 
 # --- 8. Legend ---
-legend_html = """
+def static_legend_top():
+    """Top portion of the legend — same for every view."""
+    return """
 <div style="background:#0f2535; padding:15px; border-radius:6px; font-family:monospace; color:#8fa8b8;">
     <div style="color:#F5A623; font-size:12px; text-transform:uppercase; letter-spacing:1px; margin-bottom:12px;">Legend</div>
     <div style="display:flex; align-items:center; margin-bottom:8px;">
@@ -519,10 +546,53 @@ legend_html = """
     <div style="display:flex; align-items:center; margin-bottom:8px;">
         <div style="width:20px; height:3px; background:#A0A0A0; margin-right:10px;"></div> Parish Boundaries
     </div>
-    <div style="display:flex; align-items:center; margin-bottom:8px;">
-        <div style="width:14px; height:14px; background:#00E5FF44; border:1px solid #00E5FF; margin-right:10px;"></div> Communities (select a parish)
-    </div>
-</div>"""
+    <div style="font-size:10px; color:#8fa8b8; margin-top:8px; font-style:italic;">
+        Click a community on the map to select it in the dropdown.
+    </div>"""
+
+def choropleth_gradient_bar(colors, vmin, vmax, label):
+    """Builds a small CSS gradient bar with min/max labels — a lightweight
+    stand-in for the on-map colormap legend, since that lives inside the
+    ipyleaflet widget itself and isn't easy to read out into Panel's sidebar."""
+    gradient_css = f"linear-gradient(to right, {', '.join(colors)})"
+    return f"""
+    <div style="margin-top:10px; padding-top:10px; border-top:1px solid #2a4a5a;">
+        <div style="color:#F5A623; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">{label}</div>
+        <div style="height:14px; border-radius:3px; background:{gradient_css}; margin-bottom:4px;"></div>
+        <div style="display:flex; justify-content:space-between; font-size:10px; color:#8fa8b8;">
+            <span>{vmin:.1f}%</span>
+            <span>{vmax:.1f}%</span>
+        </div>
+    </div>"""
+
+@pn.depends(parish_selector.param.value, community_selector.param.value)
+def reactive_legend(selected_parish, selected_community):
+    top = static_legend_top()
+
+    if selected_parish == 'Island-Wide':
+        burden_min = parish_gdf['avg_burden_pct'].min()
+        burden_max = parish_gdf['avg_burden_pct'].max()
+        gradient = choropleth_gradient_bar(
+            ['#1a3a4a', '#F5A623', '#FF3D00'], burden_min, burden_max,
+            "Energy Burden % (toggle layer on map)"
+        )
+    else:
+        key = parish_name_to_key.get(selected_parish)
+        subset = poverty_gdf[poverty_gdf['_parish_key'] == key]
+        pov_min = subset['Per_Tot_Po_numeric'].min()
+        pov_max = subset['Per_Tot_Po_numeric'].max()
+        if pd.notna(pov_min) and pd.notna(pov_max) and pov_min != pov_max:
+            gradient = choropleth_gradient_bar(
+                ['#00B8D4', '#FFD600', '#FF1744'], pov_min, pov_max,
+                f"Poverty Rate % — {selected_parish}"
+            )
+        else:
+            gradient = """<div style="margin-top:10px; padding-top:10px; border-top:1px solid #2a4a5a;
+                font-size:10px; color:#8fa8b8; font-style:italic;">
+                No poverty rate gradient available for this parish.</div>"""
+
+    full_html = top + gradient + "\n</div>"
+    return pn.pane.HTML(full_html, width=280)
 
 # --- 9. Reactive Energy Burden Card ---
 # Real JSLC 2023 data — replaces the placeholder. Updates with parish selection;
@@ -555,7 +625,7 @@ sidebar_content = pn.Column(
     community_selector,
     parish_info,
     pn.layout.Divider(),
-    pn.pane.HTML(legend_html, width=280),
+    reactive_legend,
     width=300,
 )
 
