@@ -24,15 +24,14 @@
 import os
 import json
 import warnings
+import math
 import geopandas as gpd
 import pandas as pd
 import panel as pn
-from ipyleaflet import Map as LeafletMap, GeoJSON, Marker, AwesomeIcon, basemaps, LayersControl, WidgetControl, LayerGroup
-from ipywidgets import HTML as IPyHTML
-import branca.colormap as cm
+import plotly.graph_objects as go
 
 # --- Initialize Panel ---
-pn.extension('ipywidgets', design='bootstrap')
+pn.extension('plotly', design='bootstrap')
 
 base_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in locals() else os.getcwd()
 
@@ -47,10 +46,6 @@ base_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in locals() 
 # NOTE: filenames were originally swapped at the source (grab_data.py scrape) —
 # jamaica_consumption_2012.geojson now correctly holds av_CONS (consumption),
 # jamaica_poverty_2012.geojson now correctly holds Per_Tot_Po (poverty rate).
-# Rename on disk with:
-#   mv assets/jamaica_consumption_2012.geojson assets/jamaica_consumption_2012_TEMP.geojson
-#   mv assets/jamaica_poverty_2012.geojson assets/jamaica_consumption_2012.geojson
-#   mv assets/jamaica_consumption_2012_TEMP.geojson assets/jamaica_poverty_2012.geojson
 parish_gdf      = gpd.read_file(os.path.join(base_dir, "assets", "ja_parishes.json"))
 poverty_gdf     = gpd.read_file(os.path.join(base_dir, "assets", "jamaica_poverty_2012.geojson"))
 consumption_gdf = gpd.read_file(os.path.join(base_dir, "assets", "jamaica_consumption_2012.geojson"))
@@ -111,8 +106,6 @@ parish_list = sorted(parish_gdf['name'].dropna().unique().tolist())
 parish_name_to_key = dict(zip(parish_gdf['name'], parish_gdf['_parish_key']))
 
 # Join burden values onto parish_gdf once, for the choropleth layer.
-# parish_gdf['_parish_key'] was stringified earlier in the stringify pass, so this
-# merge happens on the string key column, which is fine since both sides match.
 parish_gdf = parish_gdf.merge(
     burden_df[['_parish_key', 'avg_burden_pct']],
     on='_parish_key',
@@ -147,92 +140,66 @@ def update_communities(event):
 
 parish_selector.param.watch(update_communities, 'value')
 
-# --- 3. Map Builder ---
-def build_map(selected_parish, selected_community):
-    m = LeafletMap(center=(18.15, -77.3), zoom=9, basemap=basemaps.CartoDB.DarkMatter,
-                   prefer_canvas=True)
-    # prefer_canvas=True: Leaflet's SVG renderer has documented, long-standing bugs
-    # where polygon hover/click hit-detection breaks after the map pans or zooms
-    # (Leaflet issues #5773, #6142) — exactly what fit_bounds() does below every
-    # time a parish is selected. Canvas rendering avoids this entirely and also
-    # handles 100+ overlapping small polygons more reliably than SVG DOM paths.
-    m.layout.height = "500px"
+# --- 3. Plotly Map Builder ---
+# SWITCHED FROM ipyleaflet TO PLOTLY (choroplethmapbox + scattermapbox).
+# Reason: after extensive testing, ipyleaflet's GeoJSON hover/click could not
+# reliably identify individual features once a layer held 100+ polygons —
+# it consistently returned the same (last) feature regardless of cursor
+# position, across multiple different architectural attempts (single layer,
+# split into per-feature layers, persistent-widget + data mutation,
+# persistent-widget + reconstruction). Plotly's choroplethmapbox is a
+# mature, purpose-built feature for exactly this use case (many-region
+# choropleths with reliable per-feature hover — see official Plotly docs
+# examples with 15+ region choropleths), and Panel has first-party
+# documented support for click_data on Plotly panes.
 
-    # info_box is created here but added to the map AFTER LayersControl below,
-    # so it doesn't show up as an unnamed ghost entry in the layer switcher.
-    info_box = IPyHTML(value="<i>Hover over the map for details</i>")
-    info_box.layout.margin = "0px 10px 10px 10px"
+PARISH_BOUNDARY_COLOR = '#FFFFFF'
 
-    # --- Parish Boundaries — always visible, gray ---
-    parish_geojson_data = json.loads(parish_gdf.to_json())
-    parish_layer = GeoJSON(
-        data=parish_geojson_data,
+def compute_bounds_zoom(minx, miny, maxx, maxy):
+    """Rough zoom heuristic based on bounding box span in degrees."""
+    span = max(maxx - minx, maxy - miny)
+    if span <= 0:
+        return 10
+    # Empirically tuned for Jamaica-scale parish/community bounding boxes
+    zoom = math.log2(360 / span) - 1
+    return max(8, min(zoom, 13))
+
+def build_figure(selected_parish, selected_community):
+    fig = go.Figure()
+
+    # --- Parish Boundaries — plain outline, always shown ---
+    fig.add_trace(go.Choroplethmapbox(
+        geojson=parish_geojson_data,
+        locations=parish_gdf['name'],
+        z=[0] * len(parish_gdf),
+        featureidkey="properties.name",
+        colorscale=[[0, 'rgba(0,0,0,0)'], [1, 'rgba(0,0,0,0)']],
+        marker_line_width=1.5,
+        marker_line_color=PARISH_BOUNDARY_COLOR,
+        showscale=False,
+        hovertemplate="<b>Parish:</b> %{location}<extra></extra>",
         name="Parish Boundaries",
-        style={'color': '#A0A0A0', 'fillColor': '#000000', 'fillOpacity': 0.05, 'weight': 1.5},
-        hover_style={'color': '#F5A623', 'weight': 2.5, 'fillOpacity': 0.1},
-    )
+        showlegend=True,
+    ))
 
-    def parish_hover(feature, **kwargs):
-        name = feature['properties'].get('name', 'Unknown')
-        info_box.value = f"<b style='color:#F5A623'>Parish:</b> {name}"
-
-    parish_layer.on_hover(parish_hover)
-    m.add(parish_layer)
-
-    # --- Zoom to selected parish — moved here, BEFORE the community layer is
-    # added below. Leaflet has documented bugs (#5773, #6142) where polygon
-    # hover/click hit-detection breaks if the map pans/zooms AFTER an
-    # interactive layer is added. Panning first, then adding the community
-    # layer once the view has settled, avoids that entirely.
-    if selected_parish != 'Island-Wide':
-        match = parish_gdf[parish_gdf['name'] == selected_parish]
-        if len(match) > 0:
-            minx, miny, maxx, maxy = match.total_bounds
-            m.fit_bounds([[miny, minx], [maxy, maxx]])
-
-    # --- Energy Burden Choropleth (parish-level, JSLC 2023) — Island-Wide only ---
+    # --- Energy Burden Choropleth — Island-Wide only ---
     if selected_parish == 'Island-Wide':
-        burden_min = parish_gdf['avg_burden_pct'].min()
-        burden_max = parish_gdf['avg_burden_pct'].max()
-        burden_colormap = cm.LinearColormap(
-            colors=['#1a3a4a', '#F5A623', '#FF3D00'],
-            vmin=burden_min,
-            vmax=burden_max
-        )
-
-        # FIX: ipyleaflet's style_callback computes styles once at construction
-        # and doesn't reliably re-propagate to the rendered Leaflet layer — this
-        # is a long-documented ipyleaflet limitation (GitHub issues #227, #341,
-        # #607, #675), not something fixable from our side via style_callback.
-        # The reliable approach is to bake the computed color directly into each
-        # feature's properties.style BEFORE constructing the GeoJSON layer.
-        def compute_burden_color(val):
-            if val is None:
-                return {'fillColor': '#444444', 'color': '#A0A0A0', 'weight': 1, 'fillOpacity': 0.5}
-            return {'fillColor': burden_colormap(val), 'color': '#0f2535', 'weight': 1, 'fillOpacity': 0.7}
-
-        burden_geojson_data = json.loads(json.dumps(parish_geojson_data))  # deep copy
-        for feat in burden_geojson_data['features']:
-            val = feat['properties'].get('avg_burden_pct')
-            feat['properties']['style'] = compute_burden_color(val)
-
-        burden_layer = GeoJSON(
-            data=burden_geojson_data,
+        fig.add_trace(go.Choroplethmapbox(
+            geojson=parish_geojson_data,
+            locations=parish_gdf['name'],
+            z=parish_gdf['avg_burden_pct'],
+            featureidkey="properties.name",
+            colorscale=[[0, '#1a3a4a'], [0.5, '#F5A623'], [1, '#FF3D00']],
+            marker_line_width=1,
+            marker_line_color='#0f2535',
+            marker_opacity=0.75,
+            showscale=False,
+            hovertemplate="<b>Parish:</b> %{location}<br><b>Avg Energy Burden:</b> %{z:.1f}%<extra></extra>",
             name="Energy Burden (%, JSLC 2023)",
-            hover_style={'weight': 3, 'color': '#FFFFFF'},
-            visible=False  # off by default; person toggles it on via layer control
-        )
+            showlegend=True,
+        ))
 
-        def burden_hover(feature, **kwargs):
-            name = feature['properties'].get('name', 'Unknown')
-            val = feature['properties'].get('avg_burden_pct')
-            val_display = f"{val:.1f}%" if val is not None else "N/A"
-            info_box.value = f"<b style='color:#F5A623'>Parish:</b> {name}<br><b style='color:#FF8C00'>Avg Energy Burden:</b> {val_display}"
-
-        burden_layer.on_hover(burden_hover)
-        m.add(burden_layer)
-
-    # --- Communities: only render once a specific parish is chosen ---
+    # --- Communities Choropleth — only when a parish is selected ---
     if selected_parish != 'Island-Wide':
         key = parish_name_to_key.get(selected_parish)
         communities_to_show = poverty_gdf[poverty_gdf['_parish_key'] == key].copy()
@@ -242,124 +209,150 @@ def build_map(selected_parish, selected_community):
                 communities_to_show['COMM_NAME'] == selected_community
             ]
 
-        # Always-real display name, never blank — unnamed ones get a stable
-        # index (#1, #2...) instead of a repeated generic label, so hovering
-        # between two different unnamed communities visibly shows different
-        # text, proving hover is per-feature rather than stuck on one shape.
         communities_to_show = communities_to_show.reset_index(drop=True)
         communities_to_show['_comm_display'] = [
             row['COMM_NAME'] if isinstance(row['COMM_NAME'], str) and row['COMM_NAME'].strip() not in ('', 'nan', 'None')
             else f'(Unnamed community #{i+1})'
             for i, row in communities_to_show.iterrows()
         ]
+        communities_to_show['_comm_id'] = communities_to_show.index.astype(str)
 
         if len(communities_to_show) > 0:
-            communities_geojson_data = json.loads(communities_to_show.to_json())
+            comm_geojson = json.loads(communities_to_show.to_json())
+            for i, feat in enumerate(comm_geojson['features']):
+                feat['id'] = str(i)
 
-            pov_min = communities_to_show['Per_Tot_Po_numeric'].min()
-            pov_max = communities_to_show['Per_Tot_Po_numeric'].max()
-            has_poverty_gradient = pd.notna(pov_min) and pd.notna(pov_max) and pov_min != pov_max
+            custom = communities_to_show[['_comm_display', 'COMM_NAME', 'PARISH']].values
 
-            # ONE layer, matching the exact structure of the working parish
-            # burden layer: baked colors in properties.style, hover_style on
-            # THIS layer, on_hover/on_click on THIS SAME layer. No separate
-            # transparent overlay — that split was the actual bug causing both
-            # the blob hover and the washed colors.
-            if has_poverty_gradient:
-                poverty_colormap = cm.LinearColormap(
-                    colors=['#1a3a4a', '#F5A623', '#FF3D00'],
-                    vmin=pov_min,
-                    vmax=pov_max
-                )
-                for feat in communities_geojson_data['features']:
-                    val = feat['properties'].get('Per_Tot_Po_numeric')
-                    is_unnamed = str(feat['properties'].get('_comm_display', '')).startswith('(Unnamed')
-                    if val is None or (isinstance(val, float) and val != val):
-                        feat['properties']['style'] = {'fillColor': '#2a2a2a', 'color': '#666666',
-                                                        'weight': 1, 'fillOpacity': 0.6,
-                                                        'dashArray': '3, 3' if is_unnamed else None}
-                    else:
-                        try:
-                            feat['properties']['style'] = {'fillColor': poverty_colormap(float(val)),
-                                                            'color': '#0f2535', 'weight': 1, 'fillOpacity': 0.85,
-                                                            'dashArray': '3, 3' if is_unnamed else None}
-                        except (TypeError, ValueError):
-                            feat['properties']['style'] = {'fillColor': '#2a2a2a', 'color': '#666666',
-                                                            'weight': 1, 'fillOpacity': 0.6,
-                                                            'dashArray': '3, 3' if is_unnamed else None}
-            else:
-                for feat in communities_geojson_data['features']:
-                    feat['properties']['style'] = {'fillColor': '#00E5FF', 'color': '#00E5FF',
-                                                    'fillOpacity': 0.12, 'weight': 1.5}
-
-            community_layer = GeoJSON(
-                data=communities_geojson_data,
+            fig.add_trace(go.Choroplethmapbox(
+                geojson=comm_geojson,
+                locations=communities_to_show['_comm_id'],
+                z=communities_to_show['Per_Tot_Po_numeric'],
+                featureidkey="id",
+                colorscale=[[0, '#1a3a4a'], [0.5, '#F5A623'], [1, '#FF3D00']],
+                marker_line_width=1,
+                marker_line_color='#0f2535',
+                marker_opacity=0.8,
+                showscale=False,
+                customdata=custom,
+                hovertemplate="<b>Community:</b> %{customdata[0]}<br><b>Poverty Rate:</b> %{z:.1f}%<extra></extra>",
                 name="Communities",
-                hover_style={'weight': 3, 'color': '#FFFFFF'},
-            )
+                showlegend=True,
+            ))
 
-            def community_hover(feature, **kwargs):
-                name = feature['properties'].get('_comm_display', 'Unknown')
-                parish = feature['properties'].get('PARISH', '')
-                val = feature['properties'].get('Per_Tot_Po_numeric')
-                pov_str = (f"<br><b style='color:#F5A623'>Poverty Rate:</b> {val:.1f}%"
-                           if val is not None and isinstance(val, float) and val == val else "")
-                info_box.value = (
-                    f"<b style='color:#F5A623'>Community:</b> {name}"
-                    f"<br><b style='color:#F5A623'>Parish:</b> {parish}"
-                    f"{pov_str}"
-                    f"<br><i style='font-size:11px; color:#8fa8b8'>Click to select →</i>"
-                )
-
-            def community_click(feature, **kwargs):
-                name = feature['properties'].get('COMM_NAME')
-                if isinstance(name, str) and name.strip() not in ('', 'nan', 'None'):
-                    community_selector.value = name
-
-            community_layer.on_hover(community_hover)
-            community_layer.on_click(community_click)
-            m.add(community_layer)
-
-    # --- Transmission Lines — gold, always visible ---
-    transmission_geojson_data = json.loads(transmission_gdf.to_json())
-    transmission_layer = GeoJSON(
-        data=transmission_geojson_data,
+    # --- Transmission Lines ---
+    lats, lons = [], []
+    for _, row in transmission_gdf.iterrows():
+        geom = row.geometry
+        geoms = geom.geoms if geom.geom_type == 'MultiLineString' else [geom]
+        for line in geoms:
+            xs, ys = line.xy
+            lons.extend(list(xs))
+            lats.extend(list(ys))
+            lons.append(None)
+            lats.append(None)
+    fig.add_trace(go.Scattermapbox(
+        lat=lats, lon=lons, mode='lines',
+        line=dict(width=2, color='#F5A623'),
+        hoverinfo='skip',
         name="Transmission Lines",
-        style={'color': '#F5A623', 'weight': 2.0},
+    ))
+
+    # --- Power Plants ---
+    plant_rows = plants_gdf[plants_gdf['name'].apply(
+        lambda x: isinstance(x, str) and x.strip().lower() not in ('', 'nan', 'none')
+    )]
+    if len(plant_rows) > 0:
+        fig.add_trace(go.Scattermapbox(
+            lat=plant_rows.geometry.y.tolist(),
+            lon=plant_rows.geometry.x.tolist(),
+            mode='markers',
+            marker=dict(size=14, color='#FF3D00'),
+            text=[f"{n}<br>Fuel: {s}<br>Capacity: {c}" for n, s, c in zip(
+                plant_rows['name'], plant_rows.get('plant:source', ['Unknown']*len(plant_rows)),
+                plant_rows.get('plant:output:electricity', ['Unknown']*len(plant_rows))
+            )],
+            hovertemplate="%{text}<extra></extra>",
+            name="Power Plants",
+        ))
+
+    # --- View / zoom ---
+    if selected_parish != 'Island-Wide':
+        match = parish_gdf[parish_gdf['name'] == selected_parish]
+        if len(match) > 0:
+            minx, miny, maxx, maxy = match.total_bounds
+            center = {'lat': (miny + maxy) / 2, 'lon': (minx + maxx) / 2}
+            zoom = compute_bounds_zoom(minx, miny, maxx, maxy)
+        else:
+            center = {'lat': 18.15, 'lon': -77.3}
+            zoom = 9
+    else:
+        center = {'lat': 18.15, 'lon': -77.3}
+        zoom = 8
+
+    fig.update_layout(
+        mapbox_style='carto-darkmatter',
+        mapbox_center=center,
+        mapbox_zoom=zoom,
+        margin=dict(l=0, r=0, t=0, b=0),
+        showlegend=True,
+        legend=dict(
+            bgcolor='#0f2535',
+            bordercolor='#2a4a5a',
+            borderwidth=1,
+            font=dict(color='#8fa8b8', size=11, family='monospace'),
+            x=0.01, y=0.99, xanchor='left', yanchor='top',
+            title=dict(text='Layers (click to toggle)', font=dict(color='#F5A623', size=10)),
+        ),
+        paper_bgcolor='#0f2535',
+        plot_bgcolor='#0f2535',
+        height=500,
+        hoverlabel=dict(bgcolor='#0f2535', font_color='#F5A623', font_family='monospace'),
     )
-    m.add(transmission_layer)
+    return fig
 
-    # --- Power Plants — wrapped in LayerGroup so they appear as ONE entry
-    # in LayersControl, not as individual unnamed toggleable layers.
-    plant_markers = []
-    for _, row in plants_gdf.iterrows():
-        plant_name = row.get('name', '')
-        if not isinstance(plant_name, str) or plant_name.strip().lower() in ('', 'nan', 'none'):
-            continue
-        source   = row.get('plant:source', 'Unknown')
-        capacity = row.get('plant:output:electricity', 'Unknown')
-        popup_html = IPyHTML(value=f"<b style='color:#FF3D00'>{plant_name}</b><br>Fuel: {source}<br>Capacity: {capacity}")
-        marker = Marker(
-            location=(row.geometry.y, row.geometry.x),
-            icon=AwesomeIcon(name='bolt', marker_color='red', icon_color='white'),
-            draggable=False,
-        )
-        marker.popup = popup_html
-        plant_markers.append(marker)
-    m.add(LayerGroup(layers=plant_markers, name="Power Plants"))
+parish_geojson_data = json.loads(parish_gdf.to_json())
 
-    m.add(LayersControl(position='topright'))
-    # Add info_box AFTER LayersControl — WidgetControls added before LayersControl
-    # show up as unnamed ghost entries in the layer switcher list.
-    m.add(WidgetControl(widget=info_box, position='bottomright'))
+# --- Persistent Plotly pane, rebuilt via .object reassignment (documented,
+# supported Panel/Plotly pattern) rather than ipyleaflet's fragile per-feature
+# event rebinding.
+plotly_pane = pn.pane.Plotly(
+    build_figure('Island-Wide', 'All Communities'),
+    height=500,
+    sizing_mode='stretch_both',
+    config={
+        'displayModeBar': True,
+        'scrollZoom': True,       # was missing entirely — mapbox plots disable
+                                   # scroll-wheel zoom by default unless set here
+        'displaylogo': False,
+        'modeBarButtonsToRemove': [
+            'select2d', 'lasso2d', 'autoScale2d', 'toImage'
+        ],
+    },
+)
 
-    return m
+@pn.depends(parish_selector.param.value, community_selector.param.value, watch=True)
+def _update_map_figure(selected_parish, selected_community):
+    plotly_pane.object = build_figure(selected_parish, selected_community)
 
-# --- 4. Reactive Map ---
-@pn.depends(parish_selector.param.value, community_selector.param.value)
-def map_view(selected_parish, selected_community):
-    m = build_map(selected_parish, selected_community)
-    return pn.pane.IPyWidget(m, min_height=500, sizing_mode='stretch_both')
+def _handle_map_click(event):
+    click_data = event.new
+    if not click_data:
+        return
+    points = click_data.get('points', [])
+    if not points:
+        return
+    point = points[0]
+    customdata = point.get('customdata')
+    if customdata and len(customdata) > 1:
+        comm_name = customdata[1]  # COMM_NAME
+        if isinstance(comm_name, str) and comm_name.strip() not in ('', 'nan', 'None'):
+            community_selector.value = comm_name
+
+plotly_pane.param.watch(_handle_map_click, 'click_data')
+
+def map_view():
+    return plotly_pane
 
 # --- 5. Reactive Parish Info ---
 @pn.depends(parish_selector.param.value, community_selector.param.value)
@@ -551,9 +544,8 @@ def static_legend_top():
     </div>"""
 
 def choropleth_gradient_bar(colors, vmin, vmax, label):
-    """Builds a small CSS gradient bar with min/max labels — a lightweight
-    stand-in for the on-map colormap legend, since that lives inside the
-    ipyleaflet widget itself and isn't easy to read out into Panel's sidebar."""
+    """Builds a small CSS gradient bar with min/max labels — mirrors the
+    colorbar shown natively on the Plotly map, for quick sidebar reference."""
     gradient_css = f"linear-gradient(to right, {', '.join(colors)})"
     return f"""
     <div style="margin-top:10px; padding-top:10px; border-top:1px solid #2a4a5a;">
@@ -574,7 +566,7 @@ def reactive_legend(selected_parish, selected_community):
         burden_max = parish_gdf['avg_burden_pct'].max()
         gradient = choropleth_gradient_bar(
             ['#1a3a4a', '#F5A623', '#FF3D00'], burden_min, burden_max,
-            "Energy Burden % (toggle layer on map)"
+            "Energy Burden % (shown on map)"
         )
     else:
         key = parish_name_to_key.get(selected_parish)
@@ -583,7 +575,7 @@ def reactive_legend(selected_parish, selected_community):
         pov_max = subset['Per_Tot_Po_numeric'].max()
         if pd.notna(pov_min) and pd.notna(pov_max) and pov_min != pov_max:
             gradient = choropleth_gradient_bar(
-                ['#00B8D4', '#FFD600', '#FF1744'], pov_min, pov_max,
+                ['#1a3a4a', '#F5A623', '#FF3D00'], pov_min, pov_max,
                 f"Poverty Rate % — {selected_parish}"
             )
         else:
@@ -595,9 +587,6 @@ def reactive_legend(selected_parish, selected_community):
     return pn.pane.HTML(full_html, width=280)
 
 # --- 9. Reactive Energy Burden Card ---
-# Real JSLC 2023 data — replaces the placeholder. Updates with parish selection;
-# shows island-wide average when no parish is chosen.
-
 @pn.depends(parish_selector.param.value)
 def energy_burden_card(selected_parish):
     if selected_parish == 'Island-Wide':
@@ -629,16 +618,146 @@ sidebar_content = pn.Column(
     width=300,
 )
 
+# --- 10b. Right Panel: Definitions & Methodology ---
+# Mirrors the DOE LEAD Tool's approach of surfacing methodology alongside
+# the map itself, rather than burying it in a separate document. Gives the
+# page left-right symmetry: metrics/controls on the left, map in the
+# center, "how was this calculated" reference on the right.
+DEFINITIONS_CONTENT = {
+    "What is Energy Burden?": """
+**Energy Burden** is the share of a household's total spending that goes
+toward electricity.
+
+**Formula:**
+`Energy Burden = (Annual Electricity Bill ÷ Total Annual Expenditure) × 100`
+
+This is calculated per household, then averaged by parish. A burden above
+5% is generally considered high for Jamaica — worth watching as a
+benchmark when comparing parishes on this map.
+
+Jamaica does not collect direct income data in its national household
+survey (income is often underreported), so **total expenditure** is used
+as the welfare measure instead — this is the standard, internationally
+accepted substitute for income in this kind of analysis.
+""",
+    "What is Poverty Rate?": """
+**Poverty Rate** (`Per_Tot_Po`) shown at the community level is the
+estimated percentage of a community's population living below Jamaica's
+poverty line.
+
+This figure comes from a **2012 small-area statistical model**, not a
+direct survey of every community. Jamaica's national household survey
+(JSLC) only samples a few thousand households nationally — nowhere near
+enough to report a reliable number for each of the island's ~1,600
+communities individually.
+
+To fill that gap, PIOJ/STATIN combined the sparse JSLC survey data with
+the complete 2011 Population Census to statistically *estimate* poverty
+at the community level. That means these numbers are modeled best
+estimates, not direct measurements — genuinely useful for spotting
+patterns, but with more uncertainty than parish-level survey figures.
+""",
+    "Data Sources & Methodology": """
+**Energy Burden (parish-level):** Jamaica Survey of Living Conditions
+(JSLC) 2023 Annual microdata, provided directly by PIOJ. Real household
+survey responses — Annual Electricity Bill and Total Annual Expenditure
+fields, calculated per household and averaged by parish.
+
+**Poverty Rate (community-level):** 2012 small-area poverty model, PIOJ/
+STATIN, combining JSLC survey data with the 2011 Population Census.
+
+**Household Consumption (community-level):** Companion 2012 small-area
+model estimating average annual household electricity expenditure.
+
+**Population & Dwellings (community-level):** STATIN community-level
+population and dwelling counts.
+
+**Grid Infrastructure:** OpenStreetMap, extracted via Overpass Turbo —
+transmission lines, substations, and power plants as mapped by OSM
+contributors. Coverage may be incomplete in rural parishes.
+
+**Parish Boundaries:** Official Jamaica parish administrative boundaries.
+""",
+    "About Vision 2030": """
+Jamaica's **Vision 2030 National Development Plan** sets out the country's
+long-term goals for economic, social, and environmental development,
+including targets for renewable energy generation and reducing dependence
+on imported fossil fuels.
+
+This tool is built to help track progress toward those energy-specific
+goals at a sub-national level — showing where energy burden and poverty
+are concentrated, so decarbonization and energy-access investments can be
+targeted more precisely, parish by parish and community by community.
+
+The 50% renewable energy target referenced in the sidebar reflects
+Jamaica's stated ambition under this framework.
+""",
+}
+
+definitions_selector = pn.widgets.Select(
+    name='Select a Topic',
+    options=list(DEFINITIONS_CONTENT.keys()),
+    width=270
+)
+
+def _simple_markdown_to_html(text):
+    """Tiny manual markdown->HTML converter — avoids adding the `markdown`
+    package as a new dependency, since our content only ever uses **bold**,
+    `code`, and blank-line-separated paragraphs."""
+    import re
+    paragraphs = [p.strip() for p in text.strip().split("\n\n") if p.strip()]
+    html_parts = []
+    for p in paragraphs:
+        p = re.sub(r'\*\*(.+?)\*\*', r'<b style="color:#F5A623">\1</b>', p)
+        p = re.sub(r'`(.+?)`', r'<code style="background:#1a3a4a; padding:2px 5px; border-radius:3px; color:#00E5FF;">\1</code>', p)
+        p = p.replace("\n", " ")
+        html_parts.append(f"<p style='margin:0 0 12px 0;'>{p}</p>")
+    return "".join(html_parts)
+
+def render_definition_box(topic):
+    content = DEFINITIONS_CONTENT.get(topic, "")
+    html_body = _simple_markdown_to_html(content)
+    return pn.pane.HTML(f"""
+        <div style="background:#0f2535; border-left:4px solid #F5A623; border-radius:6px;
+                    padding:16px 18px; font-family:monospace; color:#8fa8b8;
+                    font-size:13px; line-height:1.6;">
+            {html_body}
+        </div>
+    """, width=280)
+
+# Explicit pn.bind rather than the bare @pn.depends decorator — more robust
+# when the reactive widget lives inside a pn.Row (main_content) rather than
+# the template's dedicated sidebar list, which is where @pn.depends was
+# silently failing to update.
+definitions_display = pn.bind(render_definition_box, definitions_selector)
+
+right_panel_content = pn.Column(
+    pn.pane.Markdown("## About This Data", styles={"color": "#F5A623"}),
+    definitions_selector,
+    definitions_display,
+    width=300,
+    styles={"border-left": "1px solid #2a4a5a", "padding-left": "20px"},
+)
+
 # --- 11. Main Layout ---
-main_content = pn.Column(
+# Restructured as a Row for left-right symmetry: map column on the left,
+# Definitions panel on the right — mirroring the metrics/controls sidebar
+# already on the far left of the page.
+map_column = pn.Column(
     pn.pane.Markdown("# Map Overview", styles={"color": "#F5A623"}),
-    map_view,
+    map_view(),
     bottom_bar,
-    sizing_mode='stretch_both',
+    sizing_mode='stretch_width',
     margin=10
 )
 
-# --- 11. Template ---
+main_content = pn.Row(
+    map_column,
+    right_panel_content,
+    sizing_mode='stretch_both',
+)
+
+# --- 12. Template ---
 template = pn.template.FastListTemplate(
     title="Jamaica Energy Atlas",
     sidebar_width=320,
