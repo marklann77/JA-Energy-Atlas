@@ -1,16 +1,16 @@
 # Jamaica Energy Atlas
 ![JA-Energy-Atlas](ja_atlas_cover.png)
 ![JA-Energy-Atlas](ja_energy_atlas.gif)
+
 ## Overview
-Last updated: July 12 2026
 
 The Jamaica Energy Atlas is a decision-support tool for equitable decarbonization, built in Python with Panel and Plotly. It provides parish- and community-level analysis of energy burden, poverty, and grid infrastructure across Jamaica, designed to show where the country stands today relative to its Vision 2030 renewable energy goals and where investment could be targeted most effectively.
 
-Jamaica's Vision 2030 National Development Plan (published 2009) originally set a goal of 20% renewables by 2030; that target was increased in 2018 to 50%. Current renewable generation sits around 10–12%. This tool is built to help visualize the gap between where Jamaica is and where it needs to be — parish by parish, community by community — rather than only at the national level, by understanding where energy burdens and poverty are highest.
+Jamaica's Vision 2030 National Development Plan (published 2009) originally set a goal of 20% renewables by 2030; that target was increased in 2018 to 50%. Current renewable generation sits around 10–12%. This tool is built to help visualize the gap between where Jamaica is and where it needs to be — parish by parish, community by community — rather than only at the national level.
 
 This is **Version 1** of the Atlas: parish-level energy burden (real JSLC 2023 survey data), community-level poverty rate and consumption (2012 small-area model), grid infrastructure mapping, and an interactive choropleth map with drill-down navigation. Later phases are planned to add decarbonization scenario modeling, rooftop solar potential analysis, and institutional/policy context layers — see the Outputs section for what's implemented now versus planned.
 
-Built in collaboration with personnel at University College London's Island and Coastal Resilience Lab and inspired by tools including the Drawdown GA Emissions and Climate Solutions Trackers, Our World in Data's emissions trackers, the U.S. DOE's LEAD and SLOPE Tools, and PIOJ's own Vision 2030 monitoring dashboards.
+Built in connection with a UCL collaboration with UCL Energy Institute's Island and Coastal Resilience Lab, and inspired by tools including the Drawdown GA Emissions and Climate Solutions Trackers, the U.S. DOE's LEAD and SLOPE Tools, and PIOJ's Vision 2030 monitoring dashboards.
 
 ## Demo / Example
 
@@ -25,13 +25,26 @@ Run locally with `panel serve app.py --show` (see Setup & Usage below).
 | Jamaica Parish Boundaries (GeoJSON) | SimpleMaps | [simplemaps.com/gis/country/jm](https://simplemaps.com/gis/country/jm) | June 2026 | Free tier, see SimpleMaps terms |
 | Incidence of Poverty, Jamaica (2012) — community-level poverty rate (`Per_Tot_Po`) | PIOJ / STATIN (ArcGIS small-area model) | ArcGIS web map, scraped via custom `grab_data.py` script into `jamaica_poverty_2012.geojson` | June 2026 | Public PIOJ data |
 | Household Consumption per Equivalent Adult, Jamaica (2012) — community-level consumption (`av_CONS`) | PIOJ / STATIN (ArcGIS small-area model) | ArcGIS web map, scraped via custom `grab_data.py` script into `jamaica_consumption_2012.geojson` | June 2026 | Public PIOJ data |
-| Jamaica Survey of Living Conditions (JSLC) Annual 2023 microdata — Annual Electricity Bill, Total Annual Expenditure, per-household | PIOJ (Statistical Institute of Jamaica survey) | Provided directly via email by Richard Leach, PIOJ | June 2026 | Research use; not redistributed in this repo |
+| Jamaica Survey of Living Conditions (JSLC) Annual 2023 microdata — Annual Electricity Bill, Total Annual Expenditure, per-household | Statistical Institute of Jamaica (STATIN) [producer]; distributed via Planning Institute of Jamaica (PIOJ) and the SALISES Derek Gordon Databank, UWI Mona | Provided via Richard Leach (PIOJ) under a SALISES Derek Gordon Databank data use agreement | June 2026 | **Non-commercial research/teaching use only** — see Data Use Terms below |
 | OSM Power Infrastructure (transmission lines, substations, power plants, generators) | OpenStreetMap contributors, via Overpass Turbo | [overpass-turbo.eu](https://overpass-turbo.eu) — two queries run June 8, 2026 and June 15, 2026 (second query expanded coverage to include `generator`, `relation` types) | June 8 & 15, 2026 | ODbL |
 | Open Infrastructure Map — baseline cross-check of 21 named power plants | Open Infrastructure Map | [openinframap.org](https://openinframap.org/#7.47/18.109/-77.088) and [plant list](https://openinframap.org/stats/area/Jamaica/plants) | June 2026 | Public |
 | GeoFabrik Jamaica OSM extract (roads, waterways, landuse, buildings, POIs, etc.) | GeoFabrik, via OpenStreetMap | [download.geofabrik.de/central-america/jamaica.html](https://download.geofabrik.de/central-america/jamaica.html) — downloaded as `.gpkg`, layers exported to GeoJSON via QGIS | June 2026 | ODbL |
 | Population and Dwelling Counts by Community | Statistical Institute of Jamaica (STATIN), 2022 Population Census | [statinja.gov.jm/PopCensus/Census2022/Population and Dwelling counts by Community.aspx](https://statinja.gov.jm/PopCensus/Census2022/Population%20and%20Dwelling%20counts%20by%20Community.aspx) | June 2026 | Public STATIN data |
 
 **Not yet integrated but downloaded for future use:** additional GeoFabrik layers (roads, waterways, water, landuse, places, transport, POIs, parking/gas, road infrastructure, houses of worship, buildings) — held as `assets/geofabrik/` for later Phase 2/3 work (e.g. rooftop solar siting).
+
+### Data Use Terms — JSLC 2023 Microdata
+
+Access to the JSLC 2023 microdata used for parish-level energy burden calculations is governed by a data use agreement with the **SALISES Derek Gordon Databank** (Sir Arthur Lewis Institute of Social and Economic Studies, UWI Mona). Per that agreement:
+
+1. **Purpose:** This data is used only for non-commercial research/teaching purposes.
+2. **Confidentiality:** No attempt is made to identify individuals or institutions from this data — all figures shown in this Atlas are aggregated to the parish level (14 parishes, no household-level data is displayed or redistributed).
+3. **Acknowledgement:** The original depositor (Statistical Institute of Jamaica) and the SALISES Derek Gordon Databank are both credited (see citation below). STATIN and PIOJ bear no responsibility for this project's further analysis or interpretation of the data.
+4. **Citation:**
+
+   > Statistical Institute of Jamaica. *Jamaica Survey of Living Conditions, 2023* [Micro-data set]. Kingston, Jamaica: Statistical Institute of Jamaica [producer], [year of original publication — to confirm]. Kingston, Jamaica: Planning Institute of Jamaica and Derek Gordon Databank, The University of the West Indies, Mona Campus [distributors], 2026.
+
+   *(Note: the exact year STATIN originally published/released the 2023 JSLC dataset needs confirming — worth checking with Richard Leach or STATIN directly before this goes fully public, so the citation is precise.)*
 
 ## Data Processing and Methodology
 
@@ -131,7 +144,7 @@ The app opens at `http://localhost:5006/app`.
 
 **Code:** MIT License
 
-**Data:** Licenses vary by source — see the Data Sources table above. OSM-derived data (GeoFabrik, Overpass Turbo) is © OpenStreetMap contributors, licensed under ODbL. JSLC 2023 microdata is used for research purposes only and is not redistributed publicly in this repository. PIOJ/STATIN small-area model data is public.
+**Data:** Licenses vary by source — see the Data Sources table above. OSM-derived data (GeoFabrik, Overpass Turbo) is © OpenStreetMap contributors, licensed under ODbL. **JSLC 2023 microdata is governed by a SALISES Derek Gordon Databank data use agreement — non-commercial research/teaching use only, not redistributed publicly in this repository, and subject to the full Data Use Terms above.** PIOJ/STATIN small-area model data (2012) is public.
 
 ## Contact
 
