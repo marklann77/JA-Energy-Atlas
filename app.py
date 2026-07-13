@@ -1,4 +1,4 @@
-# LAST UPDATED: 7-13-2026. Added margins to the tool doesn't stretch the entire page width
+# LAST UPDATED: 7-13-2026
 
 # --- ENVIRONMENT SETUP REFERENCE (KEEP FOR REFERENCE) ---
 
@@ -39,37 +39,29 @@ pn.config.raw_css.append("""
    Setting it explicitly so any margin/gap anywhere on the page shows this
    dark tone instead of the browser's raw default. */
 body {
-    background-color: #181818 !important;
+    background-color: #0d0d0d !important;
 }
 
-/* 1. LEFT SIDEBAR: Push it 150px away from the left screen edge */
+/* MARGINS: previously a fixed 150px that either showed in full or vanished
+   entirely at one hard breakpoint (1450px) — a cliff, not a scale. At
+   typical 100%-zoom laptop widths (~1440-1728px CSS px), 150px margins on
+   both sides plus two 320px sidebars ate ~940px total, leaving very little
+   room for the actual map — hence "squished" at 100% zoom vs. fine at 80%
+   zoom (which effectively grants ~25% more CSS-pixel width to work with).
+   clamp(min, preferred, max) scales the margin smoothly with viewport width
+   instead of jumping between two fixed states: 0px on very narrow screens,
+   growing up to 150px only once the viewport is genuinely wide enough
+   (~1900px+) to comfortably afford it. */
 #sidebar {
-    margin-left: 150px !important;
+    margin-left: clamp(0px, 6vw, 150px) !important;
 }
 
-/* 2. RIGHT SIDEBAR: #right-sidebar has no explicit CSS position set in Fast
-   Design's own stylesheet (confirmed by reading it directly) — it's a normal
-   flex child, same as #sidebar, defaulting to position:static. That means
-   `right:` has ZERO effect on it (that property only works on positioned
-   elements). Using margin-right instead, exactly mirroring how #sidebar
-   already correctly uses margin-left. */
 #right-sidebar {
-    margin-right: 150px !important;
+    margin-right: clamp(0px, 6vw, 150px) !important;
 }
 
-/* 3. CENTER CONTENT: Adjust the main area so it doesn't get squished or offset improperly */
 #main {
     box-sizing: border-box;
-}
-
-/* Responsive fallback: Collapse the massive margins on smaller viewports so the map stays functional */
-@media (max-width: 1450px) {
-    #sidebar {
-        margin-left: 0px !important;
-    }
-    #right-sidebar {
-        margin-right: 0px !important;
-    }
 }
 """)
 
@@ -753,18 +745,16 @@ map_column = pn.Column(
     margin=10
 )
 
-# SURGICAL CHANGE: Map container takes up full center view alone now
 main_content = pn.Row(
     map_column,
     sizing_mode='stretch_both',
 )
 
 # --- 12. Template ---
-# SURGICAL CHANGE: Fed right_panel_content into native right_sidebar slot
 template = pn.template.FastListTemplate(
     title="Jamaica Energy Atlas",
-    sidebar_width=320,
-    right_sidebar_width=320,
+    sidebar_width=300,
+    right_sidebar_width=300,
     collapsed_right_sidebar=False,
     theme='dark',
     accent_base_color="#0f2535",
