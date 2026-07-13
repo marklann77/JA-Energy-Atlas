@@ -1,5 +1,5 @@
 # Jamaica Energy Atlas
-![JA-Energy-Atlas](cover1.png)
+![JA-Energy-Atlas](ja_atlas_cover.png)
 
 ## Overview
 Last updated: July 12 2026
