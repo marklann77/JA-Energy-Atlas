@@ -1,4 +1,4 @@
-# LAST UPDATED: 7-12-2026
+# LAST UPDATED: 7-13-2026. Added margins to the tool doesn't stretch the entire page width
 
 # --- ENVIRONMENT SETUP REFERENCE (KEEP FOR REFERENCE) ---
 
@@ -30,8 +30,48 @@ import pandas as pd
 import panel as pn
 import plotly.graph_objects as go
 
-# --- Initialize Panel ---
+# --- Initialize Panel & Apply Explicit 150px Symmetrical Outer Margins ---
 pn.extension('plotly', design='bootstrap')
+
+pn.config.raw_css.append("""
+/* Fast Design's body has NO background-color set by default (just margin:0
+   and overflow:hidden) — confirmed by reading Panel's own shipped fast.css.
+   Setting it explicitly so any margin/gap anywhere on the page shows this
+   dark tone instead of the browser's raw default. */
+body {
+    background-color: #181818 !important;
+}
+
+/* 1. LEFT SIDEBAR: Push it 150px away from the left screen edge */
+#sidebar {
+    margin-left: 150px !important;
+}
+
+/* 2. RIGHT SIDEBAR: #right-sidebar has no explicit CSS position set in Fast
+   Design's own stylesheet (confirmed by reading it directly) — it's a normal
+   flex child, same as #sidebar, defaulting to position:static. That means
+   `right:` has ZERO effect on it (that property only works on positioned
+   elements). Using margin-right instead, exactly mirroring how #sidebar
+   already correctly uses margin-left. */
+#right-sidebar {
+    margin-right: 150px !important;
+}
+
+/* 3. CENTER CONTENT: Adjust the main area so it doesn't get squished or offset improperly */
+#main {
+    box-sizing: border-box;
+}
+
+/* Responsive fallback: Collapse the massive margins on smaller viewports so the map stays functional */
+@media (max-width: 1450px) {
+    #sidebar {
+        margin-left: 0px !important;
+    }
+    #right-sidebar {
+        margin-right: 0px !important;
+    }
+}
+""")
 
 base_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in locals() else os.getcwd()
 
@@ -141,18 +181,6 @@ def update_communities(event):
 parish_selector.param.watch(update_communities, 'value')
 
 # --- 3. Plotly Map Builder ---
-# SWITCHED FROM ipyleaflet TO PLOTLY (choroplethmapbox + scattermapbox).
-# Reason: after extensive testing, ipyleaflet's GeoJSON hover/click could not
-# reliably identify individual features once a layer held 100+ polygons —
-# it consistently returned the same (last) feature regardless of cursor
-# position, across multiple different architectural attempts (single layer,
-# split into per-feature layers, persistent-widget + data mutation,
-# persistent-widget + reconstruction). Plotly's choroplethmapbox is a
-# mature, purpose-built feature for exactly this use case (many-region
-# choropleths with reliable per-feature hover — see official Plotly docs
-# examples with 15+ region choropleths), and Panel has first-party
-# documented support for click_data on Plotly panes.
-
 PARISH_BOUNDARY_COLOR = '#FFFFFF'
 
 def compute_bounds_zoom(minx, miny, maxx, maxy):
@@ -160,7 +188,6 @@ def compute_bounds_zoom(minx, miny, maxx, maxy):
     span = max(maxx - minx, maxy - miny)
     if span <= 0:
         return 10
-    # Empirically tuned for Jamaica-scale parish/community bounding boxes
     zoom = math.log2(360 / span) - 1
     return max(8, min(zoom, 13))
 
@@ -313,17 +340,13 @@ def build_figure(selected_parish, selected_community):
 
 parish_geojson_data = json.loads(parish_gdf.to_json())
 
-# --- Persistent Plotly pane, rebuilt via .object reassignment (documented,
-# supported Panel/Plotly pattern) rather than ipyleaflet's fragile per-feature
-# event rebinding.
 plotly_pane = pn.pane.Plotly(
     build_figure('Island-Wide', 'All Communities'),
     height=500,
     sizing_mode='stretch_both',
     config={
         'displayModeBar': True,
-        'scrollZoom': True,       # was missing entirely — mapbox plots disable
-                                   # scroll-wheel zoom by default unless set here
+        'scrollZoom': True,
         'displaylogo': False,
         'modeBarButtonsToRemove': [
             'select2d', 'lasso2d', 'autoScale2d', 'toImage'
@@ -411,7 +434,6 @@ def lookup_burden_row(parish_display_name):
     match = burden_df[burden_df['_parish_key'] == key]
     return match.iloc[0] if len(match) > 0 else None
 
-# Island-wide average burden, computed once at startup from the JSLC 2023 parish table.
 ISLAND_AVG_BURDEN = burden_df['avg_burden_pct'].mean()
 
 def stat_block(label, value, sublabel="", color="#fff"):
@@ -425,7 +447,6 @@ def stat_block(label, value, sublabel="", color="#fff"):
 
 @pn.depends(parish_selector.param.value, community_selector.param.value)
 def bottom_bar(selected_parish, selected_community):
-    # --- Island-wide: real JSLC 2023 island average ---
     if selected_parish == 'Island-Wide':
         html = f"""
         <div style="background:#0f2535; padding:32px 32px; border-top:2px solid #F5A623;
@@ -446,7 +467,6 @@ def bottom_bar(selected_parish, selected_community):
         </div>"""
         return pn.pane.HTML(html, sizing_mode='stretch_width', margin=0)
 
-    # --- Parish selected, no specific community: show real parish burden ---
     if selected_community == 'All Communities':
         burden_row = lookup_burden_row(selected_parish)
         if burden_row is not None:
@@ -526,7 +546,6 @@ def bottom_bar(selected_parish, selected_community):
 
 # --- 8. Legend ---
 def static_legend_top():
-    """Top portion of the legend — same for every view."""
     return """
 <div style="background:#0f2535; padding:15px; border-radius:6px; font-family:monospace; color:#8fa8b8;">
     <div style="color:#F5A623; font-size:12px; text-transform:uppercase; letter-spacing:1px; margin-bottom:12px;">Legend</div>
@@ -544,8 +563,6 @@ def static_legend_top():
     </div>"""
 
 def choropleth_gradient_bar(colors, vmin, vmax, label):
-    """Builds a small CSS gradient bar with min/max labels — mirrors the
-    colorbar shown natively on the Plotly map, for quick sidebar reference."""
     gradient_css = f"linear-gradient(to right, {', '.join(colors)})"
     return f"""
     <div style="margin-top:10px; padding-top:10px; border-top:1px solid #2a4a5a;">
@@ -619,10 +636,6 @@ sidebar_content = pn.Column(
 )
 
 # --- 10b. Right Panel: Definitions & Methodology ---
-# Mirrors the DOE LEAD Tool's approach of surfacing methodology alongside
-# the map itself, rather than burying it in a separate document. Gives the
-# page left-right symmetry: metrics/controls on the left, map in the
-# center, "how was this calculated" reference on the right.
 DEFINITIONS_CONTENT = {
     "What is Energy Burden?": """
 **Energy Burden** is the share of a household's total spending that goes
@@ -701,9 +714,6 @@ definitions_selector = pn.widgets.Select(
 )
 
 def _simple_markdown_to_html(text):
-    """Tiny manual markdown->HTML converter — avoids adding the `markdown`
-    package as a new dependency, since our content only ever uses **bold**,
-    `code`, and blank-line-separated paragraphs."""
     import re
     paragraphs = [p.strip() for p in text.strip().split("\n\n") if p.strip()]
     html_parts = []
@@ -720,15 +730,11 @@ def render_definition_box(topic):
     return pn.pane.HTML(f"""
         <div style="background:#0f2535; border-left:4px solid #F5A623; border-radius:6px;
                     padding:16px 18px; font-family:monospace; color:#8fa8b8;
-                    font-size:13px; line-height:1.6;">
+                    font-size:13px; line-height:1.6; box-sizing:border-box;">
             {html_body}
         </div>
-    """, width=280)
+    """, sizing_mode='stretch_width')
 
-# Explicit pn.bind rather than the bare @pn.depends decorator — more robust
-# when the reactive widget lives inside a pn.Row (main_content) rather than
-# the template's dedicated sidebar list, which is where @pn.depends was
-# silently failing to update.
 definitions_display = pn.bind(render_definition_box, definitions_selector)
 
 right_panel_content = pn.Column(
@@ -736,13 +742,9 @@ right_panel_content = pn.Column(
     definitions_selector,
     definitions_display,
     width=300,
-    styles={"border-left": "1px solid #2a4a5a", "padding-left": "20px"},
 )
 
 # --- 11. Main Layout ---
-# Restructured as a Row for left-right symmetry: map column on the left,
-# Definitions panel on the right — mirroring the metrics/controls sidebar
-# already on the far left of the page.
 map_column = pn.Column(
     pn.pane.Markdown("# Map Overview", styles={"color": "#F5A623"}),
     map_view(),
@@ -751,20 +753,24 @@ map_column = pn.Column(
     margin=10
 )
 
+# SURGICAL CHANGE: Map container takes up full center view alone now
 main_content = pn.Row(
     map_column,
-    right_panel_content,
     sizing_mode='stretch_both',
 )
 
 # --- 12. Template ---
+# SURGICAL CHANGE: Fed right_panel_content into native right_sidebar slot
 template = pn.template.FastListTemplate(
     title="Jamaica Energy Atlas",
     sidebar_width=320,
+    right_sidebar_width=320,
+    collapsed_right_sidebar=False,
     theme='dark',
     accent_base_color="#0f2535",
     header_background="#0f2535",
     sidebar=[sidebar_content],
+    right_sidebar=[right_panel_content],
     main=[main_content],
 )
 
