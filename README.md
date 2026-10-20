@@ -5,7 +5,7 @@ The Jamaica Energy Atlas is a decision-support tool for equitable decarbonizatio
 
 Jamaica's Vision 2030 National Development Plan (published 2009) originally set a goal of 20% renewables by 2030; that target was increased in 2018 to 50%. Current renewable generation sits around 10–12%. This tool is built to help visualize the gap between where Jamaica is and where it needs to be — parish by parish, community by community — rather than only at the national level.
 
-Version 1 (Phase I) was a Python/Panel app (`app.py`, kept in this repository for reference). The current atlas (the start of Phase II) is a single page, `index.html`, with: parish-level energy burden (real JSLC 2023 survey data); community-level poverty rate and consumption for 772 communities (2012 small-area model); grid infrastructure (transmission lines and 19 power plants, including three wind farms); a parish and community drill-down; and a Chart View. Later phases are planned to add decarbonization scenario modeling, rooftop solar potential analysis, and institutional/policy context layers — see Outputs for what is implemented now versus planned.
+The atlas is a single page, `index.html`, with: parish-level energy burden (real JSLC 2023 survey data); community-level poverty rate and consumption for 772 communities (2012 small-area model); grid infrastructure (transmission lines and 19 power plants, including three wind farms); a parish and community drill-down; and a Chart View. Later phases are planned to add decarbonization scenario modeling, rooftop solar potential analysis, and institutional/policy context layers — see Outputs for what is implemented now versus planned.
 
 Built in connection with a UCL collaboration with UCL Energy Institute's Island and Coastal Resilience Lab, and inspired by tools including the Drawdown GA Emissions and Climate Solutions Trackers, the U.S. DOE's LEAD and SLOPE Tools, and PIOJ's Vision 2030 monitoring dashboards.
 
@@ -46,7 +46,6 @@ Access to the JSLC 2023 microdata used for parish-level energy burden calculatio
 - **Data preparation (Python):** GeoPandas, Shapely, Pandas and NumPy; `pyreadstat` reads the SPSS `.sav` microdata
 - **Overpass Turbo** — OSM infrastructure querying
 - **QGIS** — GeoFabrik `.gpkg` layer export to GeoJSON
-- **Version 1 app:** Python, Panel, Plotly
 
 ### Key Processing Steps
 
@@ -79,8 +78,7 @@ Access to the JSLC 2023 microdata used for parish-level energy burden calculatio
 ```
 JA-Energy-Atlas/
 ├── index.html      # The atlas (open this)
-├── README.md
-└── app.py          # Version 1 (Python/Panel app), kept for reference
+└── README.md
 ```
 The data files listed under Data Sources, and the scripts that prepared them (such as `grab_data.py`), are kept on the author's computer and are not included in this repository. The restricted household-level JSLC survey file is never published.
 
@@ -91,20 +89,6 @@ Open `index.html` in a browser, or upload that one file to GitHub Pages or any w
 
 ### Updating the data
 `index.html` contains all of its data. It was generated from the data files listed under Data Sources (kept on the author's computer) with Python (GeoPandas). When the underlying data changes, the page has to be regenerated; the generation scripts are not part of this repository.
-
-### Version 1 (Panel app)
-Version 1 reads its data from an `assets/` folder next to `app.py`. Those data files are not included in this repository, so it will not run from a fresh clone.
-
-Prerequisites: Python 3.11+
-```bash
-git clone https://github.com/marklann77/JA-Energy-Atlas.git
-cd JA-Energy-Atlas
-python3 -m venv atlas_env
-source atlas_env/bin/activate        # Mac/Linux
-# .\atlas_env\Scripts\activate       # Windows
-pip install panel geopandas pandas plotly pyreadstat
-panel serve app.py --show            # opens at http://localhost:5006/app
-```
 
 ## Outputs
 
