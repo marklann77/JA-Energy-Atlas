@@ -1,4 +1,5 @@
 # Jamaica Energy Atlas
+![Short Demo](atlas.gif)
 
 ## Overview
 The Jamaica Energy Atlas is a decision-support tool for equitable decarbonization, built as a self-contained web page (HTML, CSS and JavaScript with Plotly.js). It provides parish- and community-level analysis of energy burden, poverty, and grid infrastructure across Jamaica, designed to show where the country stands today relative to its Vision 2030 renewable energy goals and where investment could be targeted most effectively.
